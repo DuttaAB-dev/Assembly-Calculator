@@ -1,0 +1,10 @@
+# Build artifacts
+*.o
+calculator
+
+# Output and test dumps
+*.ppm
+preview_*.ppm
+
+# Internal environment skills directory
+skills/
