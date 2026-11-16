@@ -51,6 +51,7 @@
 .global WIN_W, WIN_H, fb_ptr, disp_buf, hist_buf, hex_buf, dec_buf, oct_buf, bin_buf
 .global curr_mode, curr_base, menu_open, hover_btn, active_btn, hover_menu, dirty
 .global pending_op, clr_next, acc_val, acc_int, exit_clean, exit_fail
+.global history_count, history_open, history_hover, history_entries, commit_history, clear_history
 
 # ==============================================================================
 # Window & Framebuffer Geometry Constants
@@ -136,6 +137,9 @@ str_oct_lbl:      .asciz "OCT:"
 str_bin_lbl:      .asciz "BIN:"
 
 str_default_disp: .asciz "0"
+str_hist_title:  .asciz "Calculation History"
+str_hist_empty:  .asciz "No History Yet"
+str_hist_clear:  .asciz "Clear All History"
 
 # 6. Keypad Grid Layout Tables (ASCII or custom glyph bytes)
 # Glyph IDs: 127 = ≡, 128 = π, 129 = √, 130 = ⌫, 131 = ÷, 132 = ×, 133 = ±
@@ -235,6 +239,11 @@ menu_open:      .long 0                  # Popover menu visibility flag (0 = clo
 hover_btn:      .long -1                 # Index of currently hovered button (-1 = none)
 active_btn:     .long -1                 # Index of currently pressed button (-1 = none)
 hover_menu:     .long -1                 # Index of hovered popover menu item (-1 = none)
+history_count:   .long 0                  # Number of recorded calculations (0..8)
+history_open:    .long 0                  # 1 if history popover is visible
+history_hover:   .long -1                 # Index of hovered history item (-1 = none)
+.align 8
+history_entries: .skip 8 * 64             # 8 entries * 64 bytes each
 dirty:          .long 1                  # Repaint request flag (1 = redraw needed)
 
 # Arithmetic Engine State
@@ -334,13 +343,77 @@ _start:
     mov %edx, curr_mode(%rip)            # Set target mode
 
 .no_custom_mode:
-    # Optional menu flag in argv[4] ('m' = open popover menu)
+    # Optional menu / history flag in argv[4] ('m' = open menu, 'h' = open history)
     cmp $5, %rcx
     jl .do_render_dump
     mov 40(%rax), %rsi                   # %rsi = argv[4]
     cmpb $'m', (%rsi)
-    jne .do_render_dump
-    movl $1, menu_open(%rip)             # Set popover menu open
+    je .set_m_open
+    cmpb $'h', (%rsi)
+    je .set_h_open
+    jmp .do_render_dump
+.set_m_open:
+    movl $1, menu_open(%rip)
+    jmp .do_render_dump
+.set_h_open:
+    movl $1, history_open(%rip)
+    movl $3, history_count(%rip)
+    # Mock entry 0: "12 + 4 =" -> "16"
+    lea history_entries(%rip), %rdi
+    movl $0x202B2032, (%rdi)            # "2 + "
+    movb $'1', (%rdi)
+    movb $'2', 1(%rdi)
+    movb $' ', 2(%rdi)
+    movb $'+', 3(%rdi)
+    movb $' ', 4(%rdi)
+    movb $'4', 5(%rdi)
+    movb $' ', 6(%rdi)
+    movb $'=', 7(%rdi)
+    movb $0, 8(%rdi)
+    lea history_entries+32(%rip), %rdi
+    movb $'1', (%rdi)
+    movb $'6', 1(%rdi)
+    movb $0, 2(%rdi)
+    # Mock entry 1: "sin(45) =" -> "0.707107"
+    lea history_entries+64(%rip), %rdi
+    movb $'s', (%rdi)
+    movb $'i', 1(%rdi)
+    movb $'n', 2(%rdi)
+    movb $('('), 3(%rdi)
+    movb $'4', 4(%rdi)
+    movb $'5', 5(%rdi)
+    movb $(')'), 6(%rdi)
+    movb $' ', 7(%rdi)
+    movb $'=', 8(%rdi)
+    movb $0, 9(%rdi)
+    lea history_entries+96(%rip), %rdi
+    movb $'0', (%rdi)
+    movb $'.', 1(%rdi)
+    movb $'7', 2(%rdi)
+    movb $'0', 3(%rdi)
+    movb $'7', 4(%rdi)
+    movb $'1', 5(%rdi)
+    movb $0, 6(%rdi)
+    # Mock entry 2: "710 + 710 =" -> "1420"
+    lea history_entries+128(%rip), %rdi
+    movb $'7', (%rdi)
+    movb $'1', 1(%rdi)
+    movb $'0', 2(%rdi)
+    movb $' ', 3(%rdi)
+    movb $'+', 4(%rdi)
+    movb $' ', 5(%rdi)
+    movb $'7', 6(%rdi)
+    movb $'1', 7(%rdi)
+    movb $'0', 8(%rdi)
+    movb $' ', 9(%rdi)
+    movb $'=', 10(%rdi)
+    movb $0, 11(%rdi)
+    lea history_entries+160(%rip), %rdi
+    movb $'1', (%rdi)
+    movb $'4', 1(%rdi)
+    movb $'2', 2(%rdi)
+    movb $'0', 3(%rdi)
+    movb $0, 4(%rdi)
 
 .do_render_dump:
     # Set up realistic mock display values based on selected mode
@@ -1521,7 +1594,7 @@ draw_glyph:
 
     # Validate glyph ID: font covers glyphs 32 to 136 (105 glyphs total)
     sub $32, %edx
-    cmp $105, %edx
+    cmp $106, %edx
     jge .dg_ret
     test %edx, %edx
     jl .dg_ret
@@ -1750,6 +1823,30 @@ render_ui:
     mov $1, %r9d
     call draw_string
 
+    # 5. History Button (x=328, y=8, w=36, h=34, r=10)
+    mov $328, %edi
+    mov $8, %esi
+    mov $36, %edx
+    mov $34, %ecx
+    mov $COL_BTN_IDLE, %r8d
+    cmpl $1, history_open(%rip)
+    jne .hb_idle
+    mov $COL_ACCENT, %r8d
+.hb_idle:
+    mov $COL_BTN_BORDER, %r9d
+    sub $8, %rsp
+    movq $10, (%rsp)
+    call draw_squircle
+    add $8, %rsp
+
+    # Clock icon (Glyph 136) at x=342, y=17
+    mov $342, %edi
+    mov $17, %esi
+    mov $136, %edx
+    mov $COL_TEXT_PRI, %r8d
+    mov $1, %r9d
+    call draw_glyph
+
     # 6. Window Close Button (x=372, y=8, w=36, h=34, r=17 circle)
     mov $372, %edi
     mov $8, %esi
@@ -1920,11 +2017,16 @@ render_ui:
     call render_prog_keys
 
 .check_popover:
-    # 9. Render Popover Dropdown Submenu if open
+    # 9. Render Popovers if open
+    mov history_open(%rip), %eax
+    test %eax, %eax
+    jz .chk_m_pop
+    call render_history_popover
+
+.chk_m_pop:
     mov menu_open(%rip), %eax
     test %eax, %eax
     jz .ui_done
-
     call render_popover
 
 .ui_done:
@@ -2330,6 +2432,248 @@ render_popover:
     ret
 
 # ==============================================================================
+# Calculation History Management & Rendering
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# commit_history:
+# Records a completed calculation into the history journal.
+# Reads current hist_buf (expression) and disp_buf (result).
+# Shifts existing entries down by 1, inserts new entry at index 0.
+# ------------------------------------------------------------------------------
+commit_history:
+    push %rbp
+    mov %rsp, %rbp
+    push %r12
+    push %r13
+
+    # If hist_buf is empty, do not record
+    cmpb $0, hist_buf(%rip)
+    jz .ch_done
+
+    # Increment count if less than 8
+    mov history_count(%rip), %eax
+    cmp $8, %eax
+    jge .ch_shift
+    inc %eax
+    mov %eax, history_count(%rip)
+
+.ch_shift:
+    # Shift existing entries down from 7 to 1
+    mov $7, %ecx
+.ch_s_loop:
+    cmp $0, %ecx
+    jle .ch_insert
+    mov %ecx, %eax
+    shl $6, %rax                         # i * 64
+    lea history_entries(%rip), %rdi
+    add %rax, %rdi                       # &history_entries[i]
+
+    mov %ecx, %edx
+    dec %edx
+    shl $6, %rdx
+    lea history_entries(%rip), %rsi
+    add %rdx, %rsi                       # &history_entries[i-1]
+
+    push %rcx
+    mov $16, %ecx                        # 64 bytes = 16 dwords
+    rep movsl
+    pop %rcx
+
+    dec %ecx
+    jmp .ch_s_loop
+
+.ch_insert:
+    # Copy hist_buf into history_entries[0].expr (offset 0..31)
+    lea history_entries(%rip), %rdi
+    lea hist_buf(%rip), %rsi
+    mov $31, %ecx
+.ch_cp_expr:
+    movb (%rsi), %al
+    movb %al, (%rdi)
+    test %al, %al
+    jz .ch_expr_done
+    inc %rsi
+    inc %rdi
+    dec %ecx
+    jnz .ch_cp_expr
+    movb $0, (%rdi)
+.ch_expr_done:
+
+    # Copy disp_buf into history_entries[0].res (offset 32..63)
+    lea history_entries+32(%rip), %rdi
+    lea disp_buf(%rip), %rsi
+    mov $31, %ecx
+.ch_cp_res:
+    movb (%rsi), %al
+    movb %al, (%rdi)
+    test %al, %al
+    jz .ch_res_done
+    inc %rsi
+    inc %rdi
+    dec %ecx
+    jnz .ch_cp_res
+    movb $0, (%rdi)
+.ch_res_done:
+    movl $1, dirty(%rip)
+
+.ch_done:
+    pop %r13
+    pop %r12
+    leave
+    ret
+
+# ------------------------------------------------------------------------------
+# clear_history:
+# Empties all history journal entries and clears display history line.
+# ------------------------------------------------------------------------------
+clear_history:
+    movl $0, history_count(%rip)
+    movl $-1, history_hover(%rip)
+    movb $0, hist_buf(%rip)
+    movl $1, dirty(%rip)
+    ret
+
+# ------------------------------------------------------------------------------
+# render_history_popover:
+# Renders the modern Libadwaita History Popover card.
+# Card: x=44, y=52, w=364, h=310, radius=14px.
+# ------------------------------------------------------------------------------
+render_history_popover:
+    push %rbp
+    mov %rsp, %rbp
+    sub $32, %rsp
+
+    # Card background (x=44, y=52, w=364, h=310, r=14)
+    mov $44, %edi
+    mov $52, %esi
+    mov $364, %edx
+    mov $310, %ecx
+    mov $COL_POPOVER_BG, %r8d
+    mov $COL_POPOVER_BRD, %r9d
+    sub $8, %rsp
+    movq $14, (%rsp)
+    call draw_squircle
+    add $8, %rsp
+
+    # Header Title at x=64, y=66
+    mov $64, %edi
+    mov $66, %esi
+    lea str_hist_title(%rip), %rdx
+    mov $COL_TEXT_PRI, %r8d
+    mov $1, %r9d
+    call draw_string
+
+    # Header Separator at y=88
+    mov $56, %edi
+    mov $88, %esi
+    mov $340, %edx
+    mov $1, %ecx
+    mov $COL_SEP, %r8d
+    call draw_rect
+
+    # Empty check
+    mov history_count(%rip), %eax
+    test %eax, %eax
+    jnz .rhp_has_items
+
+    mov $164, %edi
+    mov $160, %esi
+    lea str_hist_empty(%rip), %rdx
+    mov $COL_TEXT_SEC, %r8d
+    mov $1, %r9d
+    call draw_string
+    jmp .rhp_bottom
+
+.rhp_has_items:
+    xor %r12d, %r12d                     # %r12d = item index
+.rhp_loop:
+    cmp history_count(%rip), %r12d
+    jge .rhp_bottom
+    cmp $4, %r12d                        # Max 4 items shown on page
+    jge .rhp_bottom
+
+    # item_y = 94 + r12d * 42
+    mov %r12d, %eax
+    imul $42, %eax
+    add $94, %eax
+    mov %eax, %r13d
+
+    # Hover check
+    cmp history_hover(%rip), %r12d
+    jne .rhp_no_hov
+    mov $52, %edi
+    mov %r13d, %esi
+    mov $348, %edx
+    mov $38, %ecx
+    mov $COL_POPOVER_HOV, %r8d
+    mov $COL_POPOVER_HOV, %r9d
+    sub $8, %rsp
+    movq $8, (%rsp)
+    call draw_squircle
+    add $8, %rsp
+.rhp_no_hov:
+
+    # Expression at item_y + 4 (scale 1, secondary color)
+    mov $64, %edi
+    lea 4(%r13), %esi
+    mov %r12d, %eax
+    shl $6, %rax
+    lea history_entries(%rip), %rdx
+    add %rax, %rdx
+    mov $COL_TEXT_SEC, %r8d
+    mov $1, %r9d
+    call draw_string
+
+    # Result at item_y + 20 (scale 1, primary text)
+    mov $64, %edi
+    lea 20(%r13), %esi
+    mov %r12d, %eax
+    shl $6, %rax
+    lea history_entries+32(%rip), %rdx
+    add %rax, %rdx
+    mov $COL_TEXT_PRI, %r8d
+    mov $1, %r9d
+    call draw_string
+
+    inc %r12d
+    jmp .rhp_loop
+
+.rhp_bottom:
+    # Separator line at y=268
+    mov $56, %edi
+    mov $268, %esi
+    mov $340, %edx
+    mov $1, %ecx
+    mov $COL_SEP, %r8d
+    call draw_rect
+
+    # Clear All History button at y=274
+    cmpl $10, history_hover(%rip)
+    jne .rhp_no_clrhov
+    mov $52, %edi
+    mov $274, %esi
+    mov $348, %edx
+    mov $32, %ecx
+    mov $COL_POPOVER_HOV, %r8d
+    mov $COL_POPOVER_HOV, %r9d
+    sub $8, %rsp
+    movq $8, (%rsp)
+    call draw_squircle
+    add $8, %rsp
+.rhp_no_clrhov:
+
+    mov $150, %edi
+    mov $282, %esi
+    lea str_hist_clear(%rip), %rdx
+    mov $COL_DEST, %r8d
+    mov $1, %r9d
+    call draw_string
+
+    leave
+    ret
+
+# ==============================================================================
 # X11 Event Dispatcher
 # ==============================================================================
 
@@ -2373,6 +2717,44 @@ handle_x11_event:
     movswl ev_packet+24(%rip), %ecx
     movswl ev_packet+26(%rip), %edx
 
+    # 1. History popover motion tracking
+    mov history_open(%rip), %eax
+    test %eax, %eax
+    jz .chk_menu_motion
+
+    cmp $44, %ecx
+    jl .no_h_hov
+    cmp $408, %ecx
+    jg .no_h_hov
+    cmp $94, %edx
+    jl .chk_h_clr_hov
+    cmp $262, %edx
+    jge .chk_h_clr_hov
+
+    mov %edx, %eax
+    sub $94, %eax
+    xor %edx, %edx
+    mov $42, %esi
+    div %esi
+    mov %eax, history_hover(%rip)
+    movl $1, dirty(%rip)
+    jmp .h_done
+
+.chk_h_clr_hov:
+    cmp $268, %edx
+    jl .no_h_hov
+    cmp $310, %edx
+    jg .no_h_hov
+    movl $10, history_hover(%rip)
+    movl $1, dirty(%rip)
+    jmp .h_done
+
+.no_h_hov:
+    movl $-1, history_hover(%rip)
+    movl $1, dirty(%rip)
+    jmp .h_done
+
+.chk_menu_motion:
     mov menu_open(%rip), %eax
     test %eax, %eax
     jz .chk_btn_hov
@@ -2412,7 +2794,73 @@ handle_x11_event:
     movswl ev_packet+24(%rip), %ecx      # %ecx = click x
     movswl ev_packet+26(%rip), %edx      # %edx = click y
 
-    # 1. Popover open check: if menu is open, clicks either select an item or dismiss
+    # 1. History Popover open check
+    mov history_open(%rip), %eax
+    test %eax, %eax
+    jz .check_menu_open
+
+    # Check click inside history popover card (x: 44..408, y: 52..362)
+    cmp $44, %ecx
+    jl .close_hist_pop
+    cmp $408, %ecx
+    jg .close_hist_pop
+    cmp $52, %edx
+    jl .close_hist_pop
+    cmp $362, %edx
+    jg .close_hist_pop
+
+    # Check if click is on an item (y: 94..262)
+    cmp $94, %edx
+    jl .chk_hist_clr_click
+    cmp $262, %edx
+    jge .chk_hist_clr_click
+
+    mov %edx, %eax
+    sub $94, %eax
+    xor %edx, %edx
+    mov $42, %esi
+    div %esi
+    cmp history_count(%rip), %eax
+    jge .close_hist_pop
+
+    # Copy history_entries[eax].res into disp_buf!
+    shl $6, %rax
+    lea history_entries+32(%rip), %rsi
+    add %rax, %rsi
+    lea disp_buf(%rip), %rdi
+.h_copy_res:
+    movb (%rsi), %al
+    movb %al, (%rdi)
+    inc %rsi
+    inc %rdi
+    test %al, %al
+    jnz .h_copy_res
+
+    # Synchronize programmer readouts if in programmer mode
+    mov curr_mode(%rip), %eax
+    cmp $2, %eax
+    jne .h_load_done
+    call update_prog_readouts
+.h_load_done:
+    movl $1, clr_next(%rip)              # Next typed digit replaces restored result
+    jmp .close_hist_pop
+
+.chk_hist_clr_click:
+    # Check if click is on "Clear All History" (y: 268..310)
+    cmp $268, %edx
+    jl .close_hist_pop
+    cmp $310, %edx
+    jg .close_hist_pop
+    call clear_history
+    jmp .close_hist_pop
+
+.close_hist_pop:
+    movl $0, history_open(%rip)
+    movl $1, dirty(%rip)
+    jmp .h_done
+
+.check_menu_open:
+    # 2. Hamburger Popover open check: if menu is open, clicks either select an item or dismiss
     mov menu_open(%rip), %eax
     test %eax, %eax
     jz .check_header_click
@@ -2467,14 +2915,30 @@ handle_x11_event:
 
     # Hamburger button check: x: 12..48, y: 8..42
     cmp $12, %ecx
-    jl .chk_close
+    jl .chk_hist_btn
     cmp $48, %ecx
+    jg .chk_hist_btn
+    cmp $8, %edx
+    jl .chk_hist_btn
+    cmp $42, %edx
+    jg .chk_hist_btn
+    movl $0, history_open(%rip)
+    xorl $1, menu_open(%rip)             # Toggle popover menu
+    movl $1, dirty(%rip)
+    jmp .h_done
+
+.chk_hist_btn:
+    # History button check: x: 328..364, y: 8..42
+    cmp $328, %ecx
+    jl .chk_close
+    cmp $364, %ecx
     jg .chk_close
     cmp $8, %edx
     jl .chk_close
     cmp $42, %edx
     jg .chk_close
-    xorl $1, menu_open(%rip)             # Toggle popover menu
+    movl $0, menu_open(%rip)
+    xorl $1, history_open(%rip)          # Toggle history popover
     movl $1, dirty(%rip)
     jmp .h_done
 
@@ -2496,6 +2960,17 @@ handle_x11_event:
     jmp .h_done
 
 .check_keypad_click:
+    # Check click on History Expression row in Display Card (y: 62..96)
+    cmp $62, %edx
+    jl .chk_prog_bases
+    cmp $96, %edx
+    jge .chk_prog_bases
+    movl $0, menu_open(%rip)
+    movl $1, history_open(%rip)          # Open history popover on history row click!
+    movl $1, dirty(%rip)
+    jmp .h_done
+
+.chk_prog_bases:
     # In Programmer Mode, check clicks on the 4 base rows inside the display card
     mov curr_mode(%rip), %eax
     cmp $2, %eax

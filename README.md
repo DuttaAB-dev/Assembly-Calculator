@@ -11,19 +11,26 @@ A modern, standalone desktop calculator built **100% in pure x86_64 Linux assemb
 
 - **Libadwaita Dark Design System**:
   - Exact Adwaita color palette (window background `#242424`, display card `#1E1E1E`, buttons `#323232`, accent blue `#3584E4`, destructive red `#E01B24`).
-  - Client-Side Decorations (CSD): Custom headerbar with title, hamburger menu, and close button, with window decorations suppressed via `_MOTIF_WM_HINTS`.
+  - Client-Side Decorations (CSD): Custom headerbar with title, hamburger menu, history clock button, and close button, with window decorations suppressed via `_MOTIF_WM_HINTS`.
   - Window Dragging: Native interactive window movement via EWMH `_NET_WM_MOVERESIZE`.
   - Physical Window Rounded Corners: Physical window clipped to $r=16\text{px}$ using the **X11 Shape Extension** (`ShapeRectangles`).
   - Smooth Antialiased Squircles: Custom rasterizer for rounded corners ($cx^2 + cy^2 \le r^2$) with 1px borders across all buttons, cards, and popovers.
   - Enlarged Bold Typography: Modern $8\times 16$ bitmap glyphs synthesized from `AdwaitaMono-Bold.ttf`, rendered with integer scaling ($2\times$) and boundary clipping.
 
+- **Fully Functional Calculation History & Journal**:
+  - **Live Expression Display**: Current ongoing calculation expression is rendered clearly in the display card (e.g. `12 + 4 =`, `sin(45) =`, `0xFF & 0x0F =`).
+  - **Multi-Entry History Journal**: Automatically records up to 8 completed calculations across Basic, Scientific, and Programmer modes.
+  - **Dedicated History Popover**: Accessible via the Clock icon (`⏱`) in the HeaderBar or by clicking the history expression directly in the Display Card.
+  - **Interactive Result Recall**: Clicking any previous calculation in the history popover instantly loads its result back into the active display for subsequent operations.
+  - **Clear All History**: Wipes the history journal and resets the display history. Pressing `C` (Clear) resets active input without destroying previous history entries.
+
 - **Three Operational Modes**:
   - **Basic Mode**: Standard 4x5 keypad layout with operator chaining, display history, and sign inversion.
-  - **Scientific Mode**: 5x6 keypad layout with degree/radian trigonometric functions ($\sin$, $\cos$, $\tan$), constants ($\pi$, $e$), powers ($x^2$, $\sqrt{x}$, $1/x$), and logarithms ($\ln$, $\log_{10}$).
+  - **Scientific Mode**: 5x6 keypad layout with degree/radian trigonometric functions ($\sin$, $\cos$, $\tan$), constants ($\pi$, $e$), powers ($x^2$, $\sqrt{x}$, $1/x$), and logarithms ($\ln$, $\log_{10}$), all with automated history recording.
   - **Programmer Mode**: 5x6 keypad layout with 64-bit integer signed arithmetic, bitwise logic (`&`, `|`, `^`, `~`, `<<`, `>>`), hexadecimal entry (`A`–`F`), and a live synchronized 4-base inspector displaying **HEX**, **DEC**, **OCT**, and **BIN** representations.
 
 - **Headless CI & Testing**:
-  - Command-line flag `--dump <output.ppm> [mode] [menu]` renders full frames to Netpbm PPM image files without needing a running X server or display connection.
+  - Command-line flag `--dump <output.ppm> [mode] [menu/history]` renders full frames to Netpbm PPM image files without needing a running X server or display connection.
 
 ---
 
@@ -33,7 +40,7 @@ A modern, standalone desktop calculator built **100% in pure x86_64 Linux assemb
 Assembly-Calculator/
 ├── calc_ui.s      # UI Subsystem, Direct X11 Socket Driver & Software Rasterizer
 ├── calc_core.s    # Arithmetic Engine, x87 FPU Math, Radix Formatters & Keypad Dispatch
-├── font.bin       # Embedded 104-glyph 8x16 bitmap typography font
+├── font.bin       # Embedded 105-glyph 8x16 bitmap typography font (includes Clock icon)
 ├── Makefile       # Standalone build automation (as + ld + strip)
 └── README.md      # Comprehensive architecture and technical documentation
 ```
@@ -48,6 +55,10 @@ Assembly-Calculator/
   - Creates the top-level window (`CreateWindow`), graphics context (`CreateGC`), and sets CSD hints.
   - Configures physical window rounded corners via `QueryExtension "SHAPE"` and `ShapeRectangles` (minor opcode 1) with 33 clipping rectangles.
   - Pushes rendered framebuffer frames to screen in 32-row slices via `PutImage` (ZPixmap format, 24/32-bit depth).
+- **History Journal & Popover Subsystem**:
+  - `commit_history`: Inserts completed calculation into a ring buffer of 8 entries (`expr` up to 32 bytes, `res` up to 32 bytes).
+  - `clear_history`: Empties all history records.
+  - `render_history_popover`: Renders modern Libadwaita popover card displaying past calculations with hover states and recall interactions.
 - **Software Graphics Engine**:
   - `draw_rect`: Solid color fills using `rep stosl`.
   - `draw_squircle`: Evaluates Euclidean distance $(x - cx)^2 + (y - cy)^2 \le r^2$ with 1px border generation and clipping.
@@ -68,6 +79,9 @@ Assembly-Calculator/
   - `format_double`: Formats `ST(0)` float into human-readable string, truncating integer part with `fisttpq`, extracting up to 6 decimal digits, and stripping trailing zeros.
   - `int_to_str`: Converts unsigned 64-bit integer to decimal string.
   - `parse_int64`: Radix-aware parser supporting HEX (0-9, A-F), DEC, OCT (0-7), and BIN (0-1).
+- **Scientific & Programmer History Formatters**:
+  - `scifn_prep`: Formats function expression (`sin(45) =`, etc.) and commits to history on calculation.
+  - Programmer operations (`&`, `|`, `^`, `<<`, `>>`, `~`) update history expressions and commit to journal.
 - **Programmer Multi-Base Formatters**:
   - Synchronously updates four distinct readout buffers: `hex_buf` (`0xXXXXXXXX`), `dec_buf`, `oct_buf` (`0o...`), and `bin_buf` (`XXXXXXXX XXXXXXXX XXXXXXXX XXXXXXXX`).
 
@@ -96,15 +110,16 @@ Launch the calculator GUI:
 ### Headless Verification (Frame Dump)
 To render and verify the UI headlessly without an X server:
 ```bash
-# Dump all modes and popover menu to PPM image files
+# Dump all modes, menu, and history to PPM image files
 make dump
 
 # Or specify custom modes directly:
-# ./calculator --dump <filename.ppm> [mode: 0=Basic, 1=Scientific, 2=Programmer] [menu: 'm']
+# ./calculator --dump <filename.ppm> [mode: 0=Basic, 1=Scientific, 2=Programmer] [popover: 'm'=menu, 'h'=history]
 ./calculator --dump preview_basic.ppm 0
 ./calculator --dump preview_adv.ppm 1
 ./calculator --dump preview_prog.ppm 2
 ./calculator --dump preview_menu.ppm 0 m
+./calculator --dump preview_hist.ppm 0 h
 ```
 
 ---
@@ -118,7 +133,7 @@ make dump
 | `+`, `-`, `*`, `/` | Arithmetic operators |
 | `Enter` / `Numpad Enter` | Evaluate expression (`=`) |
 | `BackSpace` | Delete last entered character |
-| `Escape` / `c` | Clear display and reset state (`C`) |
+| `Escape` / `c` | Clear active display input (`C`) |
 
 ---
 

@@ -30,6 +30,7 @@ dump: calculator
 	./calculator --dump preview_adv.ppm 1
 	./calculator --dump preview_prog.ppm 2
 	./calculator --dump preview_menu.ppm 0 m
+	./calculator --dump preview_hist.ppm 0 h
 
 # Remove build artifacts and temporary previews
 clean:

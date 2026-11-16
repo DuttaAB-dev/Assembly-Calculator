@@ -5,34 +5,6 @@
 # Free of C runtime (libc), dynamic linkers, Python, or external dependencies.
 # Direct hardware instructions: x87 FPU, 64-bit integer ALU, and string parsing.
 # ==============================================================================
-#
-# Subsystem Architecture:
-# ------------------------
-# 1. Display Buffer Operations:
-#    - append_disp_char: Appends typed character to active display buffer.
-#    - clear_disp:       Resets display, expression history, and arithmetic state.
-#    - bksp_disp:        Erases the last character (or resets to '0').
-#    - toggle_sign:      Negates or restores the active display number (+/-).
-#
-# 2. Keypad Action Dispatchers:
-#    - exec_basic_key:   Maps basic keypad button clicks (0..19) to operations.
-#    - exec_adv_key:     Maps scientific button clicks (0..29) to trig/log/powers.
-#    - exec_prog_key:    Maps programmer button clicks (0..29) to bitwise/radix ops.
-#
-# 3. Arithmetic & Evaluation State Machine:
-#    - op_add, op_sub, op_mul, op_div: Prepares and chains pending operators.
-#    - apply_op:         Handles intermediate chained expressions (e.g. 2 + 3 + ...).
-#    - eval_expression:  Finalizes expression on '=' and renders output.
-#    - eval_math_only:   Executes pending binary operations on IEEE-754 floats.
-#    - eval_prog_op:     Executes pending binary bitwise/integer operations.
-#
-# 4. Conversion & Formatting Engine:
-#    - parse_double:     Parses ASCII numeric string into 80-bit float on x87 stack.
-#    - format_double:    Converts 80-bit float into human-readable formatted string.
-#    - int_to_str:       Converts unsigned 64-bit integer to decimal ASCII string.
-#    - parse_int64:      Parses numeric string according to active radix (HEX/DEC/OCT/BIN).
-#    - update_prog_readouts: Synchronously updates 4 live multi-base inspector buffers.
-# ==============================================================================
 
 # ------------------------------------------------------------------------------
 # Exported Global Symbols (Interface to calc_ui.s)
@@ -44,7 +16,7 @@
 .global op_add, op_sub, op_mul, op_div
 
 # ------------------------------------------------------------------------------
-# External State Variables (Defined in calc_ui.s .data / .bss sections)
+# External State Variables & History Callbacks (Defined in calc_ui.s)
 # ------------------------------------------------------------------------------
 .extern disp_buf         # Main numeric entry string buffer (null-terminated)
 .extern hist_buf         # Previous calculation expression history string
@@ -59,6 +31,8 @@
 .extern acc_val          # 64-bit IEEE-754 double precision accumulator
 .extern acc_int          # 64-bit integer accumulator for programmer mode
 .extern dirty            # Repaint flag for the UI rendering loop
+.extern commit_history   # Records completed calculation into history journal
+.extern clear_history    # Clears all recorded calculations
 
 # ==============================================================================
 # Read-Only Data Section (Math Constants & Error Strings)
@@ -77,6 +51,24 @@ fp_e:       .double 2.71828182845904523536  # Euler's number (e)
 str_err_div: .asciz "Cannot divide by 0"     # Displayed on division by zero
 str_err_nan: .asciz "Error"                  # Displayed on NaN or Infinity overflow
 
+# Scientific Function History Formatting Prefixes
+str_fn_sin:  .asciz "sin("
+str_fn_cos:  .asciz "cos("
+str_fn_tan:  .asciz "tan("
+str_fn_sqrt: .asciz "√("
+str_fn_inv:  .asciz "1/("
+str_fn_ln:   .asciz "ln("
+str_fn_log:  .asciz "log("
+str_fn_pi:   .asciz "π ="
+str_fn_e:    .asciz "e ="
+
+# Programmer Mode History Symbols
+str_sym_and: .asciz " & "
+str_sym_or:  .asciz " | "
+str_sym_xor: .asciz " ^ "
+str_sym_shl: .asciz " << "
+str_sym_shr: .asciz " >> "
+
 # ==============================================================================
 # Executable Code Section (.text)
 # ==============================================================================
@@ -85,18 +77,10 @@ str_err_nan: .asciz "Error"                  # Displayed on NaN or Infinity over
 # ------------------------------------------------------------------------------
 # append_disp_char:
 # Appends a single ASCII character (digit, decimal point, etc.) to disp_buf.
-#
-# Calling Convention:
-#   Input:   %al = ASCII character to append
-#   Output:  None (disp_buf updated in-place)
-#   Scratch: %rdx, %rsi, %rcx
-#   Safety:  Clamps buffer length to 28 characters to prevent buffer overrun.
 # ------------------------------------------------------------------------------
 append_disp_char:
     push %rax                   # Preserve input character across clr_next check
 
-    # If clr_next is non-zero, the user previously pressed an operator or equals;
-    # clear display buffer first so the new digit starts a fresh number.
     mov clr_next(%rip), %edx
     test %edx, %edx
     jz .ap_cont
@@ -117,8 +101,6 @@ append_disp_char:
     jmp .ap_len
 
 .ap_insert:
-    # UX rule: If current buffer is exactly "0" and input is a digit (not '.'),
-    # replace the leading '0' with the new digit instead of appending "07".
     cmp $1, %rcx
     jne .do_ap
     cmpb $'0', (%rsi)
@@ -129,7 +111,6 @@ append_disp_char:
     ret
 
 .do_ap:
-    # Append character at current length offset and write terminating null byte
     movb %al, (%rsi, %rcx)
     movb $0, 1(%rsi, %rcx)
 .ap_ret:
@@ -137,23 +118,18 @@ append_disp_char:
 
 # ------------------------------------------------------------------------------
 # clear_disp:
-# Resets the calculator display and arithmetic state back to initial power-on state.
-#
-# Calling Convention:
-#   Input:   None
-#   Output:  None (state cleared, disp_buf reset to "0")
+# Clears the active numeric input display (C key).
+# Preserves past history journal entries.
 # ------------------------------------------------------------------------------
 clear_disp:
     lea disp_buf(%rip), %rdi
     movb $'0', (%rdi)           # Display resets to default "0"
     movb $0, 1(%rdi)            # Null terminate
-    movb $0, hist_buf(%rip)     # Clear expression history
     movl $0, pending_op(%rip)   # Clear pending operator
     movl $0, clr_next(%rip)     # Reset clear-on-next flag
     movq $0, acc_val(%rip)      # Reset floating-point accumulator to 0.0
     movq $0, acc_int(%rip)      # Reset integer accumulator to 0
 
-    # If currently in Programmer Mode (mode == 2), refresh the 4-base readouts
     mov curr_mode(%rip), %eax
     cmp $2, %eax
     jne .cd_done
@@ -163,36 +139,30 @@ clear_disp:
 
 # ------------------------------------------------------------------------------
 # bksp_disp:
-# Backspaces (erases) the rightmost character in disp_buf.
-# If only 1 character remains, resets display to "0" instead of empty string.
-#
-# Calling Convention:
-#   Input:   None
-#   Output:  None (disp_buf modified in-place)
+# Erases rightmost character in disp_buf.
 # ------------------------------------------------------------------------------
 bksp_disp:
-    lea disp_buf(%rip), %rdi    # %rdi = pointer to display buffer
-    xor %rcx, %rcx              # %rcx = length counter
+    lea disp_buf(%rip), %rdi
+    xor %rcx, %rcx
 
 .bkl:
-    cmpb $0, (%rdi, %rcx)       # Find end of string
+    cmpb $0, (%rdi, %rcx)
     jz .bk_found
     inc %rcx
     jmp .bkl
 
 .bk_found:
-    cmp $1, %rcx                # If length <= 1, erasing leaves "0"
+    cmp $1, %rcx
     jle .bk_reset
-    dec %rcx                    # Step back one character
-    movb $0, (%rdi, %rcx)       # Truncate string with null terminator
+    dec %rcx
+    movb $0, (%rdi, %rcx)
     jmp .bk_check_prog
 
 .bk_reset:
-    movb $'0', (%rdi)           # Reset to single digit '0'
+    movb $'0', (%rdi)
     movb $0, 1(%rdi)
 
 .bk_check_prog:
-    # Update programmer readouts if active
     mov curr_mode(%rip), %eax
     cmp $2, %eax
     jne .bk_done
@@ -202,46 +172,40 @@ bksp_disp:
 
 # ------------------------------------------------------------------------------
 # toggle_sign:
-# Inverts the numeric sign of disp_buf (+/-).
-# - If negative: removes leading '-' by shifting characters left.
-# - If positive: shifts characters right and inserts '-' at index 0.
-# - If zero ("0"): no-op.
+# Inverts numeric sign (+/-).
 # ------------------------------------------------------------------------------
 toggle_sign:
-    lea disp_buf(%rip), %rdi    # %rdi = pointer to disp_buf
-    cmpb $'0', (%rdi)           # If value is "0", do nothing
+    lea disp_buf(%rip), %rdi
+    cmpb $'0', (%rdi)
     jne .ts_check_neg
     cmpb $0, 1(%rdi)
-    je .ts_ret                  # Ignore toggle on standalone 0
+    je .ts_ret
 
 .ts_check_neg:
     cmpb $'-', (%rdi)
     jne .ts_add_neg
 
-    # Remove leading '-' by shifting the string 1 byte to the left
     mov %rdi, %rsi
-    inc %rsi                    # %rsi points to first character after '-'
+    inc %rsi
 .ts_copy:
     movb (%rsi), %al
-    movb %al, (%rdi)            # Shift character left
+    movb %al, (%rdi)
     inc %rdi
     inc %rsi
-    test %al, %al               # Stop when null terminator is copied
+    test %al, %al
     jnz .ts_copy
     jmp .ts_check_prog
 
 .ts_add_neg:
-    # Prepend '-' by shifting the string 1 byte to the right
-    mov $30, %rcx               # Start from end of maximum buffer length
+    mov $30, %rcx
 .ts_shift:
     movb (%rdi, %rcx), %al
-    movb %al, 1(%rdi, %rcx)     # Shift character right
+    movb %al, 1(%rdi, %rcx)
     dec %rcx
     jns .ts_shift
-    movb $'-', (%rdi)           # Place minus sign at index 0
+    movb $'-', (%rdi)
 
 .ts_check_prog:
-    # Synchronize programmer readouts if in programmer mode
     mov curr_mode(%rip), %eax
     cmp $2, %eax
     jne .ts_ret
@@ -252,16 +216,6 @@ toggle_sign:
 # ------------------------------------------------------------------------------
 # exec_basic_key:
 # Dispatches keypad click events for Basic Calculator mode.
-#
-# Keypad Grid Layout: 4 columns x 5 rows = 20 buttons (indices 0..19)
-#   Row 0:  0: C,    1: ⌫,    2: +/-,  3: ÷
-#   Row 1:  4: 7,    5: 8,    6: 9,    7: ×
-#   Row 2:  8: 4,    9: 5,   10: 6,   11: -
-#   Row 3: 12: 1,   13: 2,   14: 3,   15: +
-#   Row 4: 16: (,   17: 0,   18: .,   19: =
-#
-# Calling Convention:
-#   Input:   %eax = Key index (0..19)
 # ------------------------------------------------------------------------------
 exec_basic_key:
     cmp $0, %eax; je clear_disp
@@ -286,7 +240,6 @@ exec_basic_key:
     cmp $19, %eax; je eval_expression
     ret
 
-# Digit and punctuation entry trampolines
 .d7: movb $'7', %al; jmp append_disp_char
 .d8: movb $'8', %al; jmp append_disp_char
 .d9: movb $'9', %al; jmp append_disp_char
@@ -302,66 +255,51 @@ exec_basic_key:
 
 # ------------------------------------------------------------------------------
 # Operator Handlers (+, -, *, /)
-# Sets opcode in %edi and ASCII/custom glyph byte in %sil, then enters apply_op.
 # ------------------------------------------------------------------------------
 op_add:
-    mov $1, %edi                # Opcode 1 = Addition
+    mov $1, %edi
     movb $'+', %sil
     jmp apply_op
 
 op_sub:
-    mov $2, %edi                # Opcode 2 = Subtraction
+    mov $2, %edi
     movb $'-', %sil
     jmp apply_op
 
 op_mul:
-    mov $3, %edi                # Opcode 3 = Multiplication
-    movb $132, %sil             # Glyph 132 = '×'
+    mov $3, %edi
+    movb $132, %sil             # '×'
     jmp apply_op
 
 op_div:
-    mov $4, %edi                # Opcode 4 = Division
-    movb $131, %sil             # Glyph 131 = '÷'
+    mov $4, %edi
+    movb $131, %sil             # '÷'
     jmp apply_op
 
 # ------------------------------------------------------------------------------
 # apply_op:
 # Prepares or chains a binary operator (+, -, ×, ÷).
-#
-# Logic:
-#   1. If an operator is already pending and user typed a number (clr_next == 0),
-#      evaluates the pending calculation first (e.g., 5 + 3 + -> 8 +).
-#   2. If user clicks another operator immediately (clr_next == 1), updates the
-#      pending operator and history symbol without re-evaluating.
-#   3. Stores current display value into accumulator (acc_val).
-#   4. Updates hist_buf with "<number> <symbol> ".
-#   5. Sets pending_op and flags clr_next = 1.
 # ------------------------------------------------------------------------------
 apply_op:
-    push %rdi                   # Preserve operator code on stack
-    push %rsi                   # Preserve operator symbol byte on stack
+    push %rdi
+    push %rsi
 
-    # Check if an operator is already pending
     mov pending_op(%rip), %eax
     test %eax, %eax
     jz .ao_fresh
 
-    # If user didn't enter a new number, just change the pending operator
     mov clr_next(%rip), %eax
     test %eax, %eax
     jnz .ao_update_sym
 
-    # Evaluate previous pending operation before chaining the next
     call eval_math_only
 
 .ao_fresh:
-    # Parse display buffer into 80-bit float and save into acc_val
     lea disp_buf(%rip), %rsi
     call parse_double
     fstpl acc_val(%rip)
 
 .ao_update_sym:
-    # Build history string: copy disp_buf + " <operator_symbol> " into hist_buf
     lea hist_buf(%rip), %rdi
     lea disp_buf(%rip), %rsi
 .ao_cpy:
@@ -371,35 +309,28 @@ apply_op:
     inc %rsi
     test %al, %al
     jnz .ao_cpy
-    dec %rdi                    # Rewind to overwrite null terminator
+    dec %rdi
 
-    # Append space, symbol, space, null
     movb $' ', (%rdi)
-    pop %rsi                    # Restore operator symbol
+    pop %rsi
     movb %sil, 1(%rdi)
     movb $' ', 2(%rdi)
     movb $0, 3(%rdi)
 
-    pop %rdi                    # Restore operator code
-    mov %edi, pending_op(%rip)  # Record pending operator
-    movl $1, clr_next(%rip)     # Set clear-on-next flag for incoming digits
+    pop %rdi
+    mov %edi, pending_op(%rip)
+    movl $1, clr_next(%rip)
     ret
 
 # ------------------------------------------------------------------------------
 # eval_expression:
-# Evaluates the full expression when '=' is clicked.
-# - Programmer Mode: delegates to 64-bit integer evaluator (eval_prog_op).
-# - Basic / Scientific Modes:
-#     Appends current display string and " =" to hist_buf.
-#     Calls eval_math_only to compute result.
-#     Clears pending_op and sets clr_next = 1.
+# Evaluates expression on '=' and commits completed calculation to history.
 # ------------------------------------------------------------------------------
 eval_expression:
     mov pending_op(%rip), %eax
     test %eax, %eax
-    jz .ee_ret                  # No pending operation to evaluate
+    jz .ee_ret
 
-    # In Programming mode, handle 64-bit integer operations
     mov curr_mode(%rip), %edx
     cmp $2, %edx
     je eval_prog_op
@@ -421,34 +352,27 @@ eval_expression:
     inc %rsi
     test %al, %al
     jnz .ee_cpy2
-    dec %rdi                    # Rewind over null terminator
-    movb $' ', (%rdi)           # Append " ="
+    dec %rdi
+    movb $' ', (%rdi)
     movb $'=', 1(%rdi)
     movb $0, 2(%rdi)
 
-    # Perform arithmetic evaluation on FPU
     call eval_math_only
-    movl $0, pending_op(%rip)   # Clear pending operation
-    movl $1, clr_next(%rip)     # Next keystroke starts fresh number
+    call commit_history         # Record into history journal!
+    movl $0, pending_op(%rip)
+    movl $1, clr_next(%rip)
 .ee_ret:
     ret
 
 # ------------------------------------------------------------------------------
 # eval_math_only:
-# Executes the pending binary operation between acc_val and disp_buf.
-#
-# FPU Stack Layout:
-#   ST(1) = acc_val (first operand)
-#   ST(0) = parse_double(disp_buf) (second operand)
-#
-# Evaluates operation, guards against division by zero, and formats the result
-# back into disp_buf as well as updating acc_val.
+# Executes pending binary operation on FPU stack.
 # ------------------------------------------------------------------------------
 eval_math_only:
-    sub $16, %rsp               # Allocate stack frame for FPU storage
-    fldl acc_val(%rip)          # Load accumulator: ST(1) = acc_val
+    sub $16, %rsp
+    fldl acc_val(%rip)
     lea disp_buf(%rip), %rsi
-    call parse_double           # Parse disp_buf:   ST(0) = disp_val, ST(1) = acc_val
+    call parse_double
 
     mov pending_op(%rip), %eax
     cmp $1, %eax
@@ -460,35 +384,32 @@ eval_math_only:
     cmp $4, %eax
     je .emo_div
 
-    # Unknown operation fallback: pop both floats and return
     fstp %st(0)
     fstp %st(0)
     add $16, %rsp
     ret
 
 .emo_add:
-    faddp                       # ST(1) = ST(1) + ST(0), pop -> ST(0)
+    faddp
     jmp .emo_save
 
 .emo_sub:
-    fsubrp                      # ST(1) = ST(1) - ST(0), pop -> ST(0)
+    fsubrp
     jmp .emo_save
 
 .emo_mul:
-    fmulp                       # ST(1) = ST(1) * ST(0), pop -> ST(0)
+    fmulp
     jmp .emo_save
 
 .emo_div:
-    # Check division by zero: compare ST(0) (divisor) with 0.0
-    fldz                        # Push 0.0: ST(0) = 0.0, ST(1) = divisor, ST(2) = dividend
-    fcomip %st(1), %st(0)       # Compare 0.0 with divisor and pop 0.0
+    fldz
+    fcomip %st(1), %st(0)
     jne .emo_do_div
 
-    # Division by zero detected!
-    fstp %st(0)                 # Pop divisor
-    fstp %st(0)                 # Pop dividend
+    fstp %st(0)
+    fstp %st(0)
     lea disp_buf(%rip), %rdi
-    lea str_err_div(%rip), %rsi # Copy "Cannot divide by 0" into display buffer
+    lea str_err_div(%rip), %rsi
 .emo_err_cpy:
     movb (%rsi), %al
     movb %al, (%rdi)
@@ -500,68 +421,53 @@ eval_math_only:
     ret
 
 .emo_do_div:
-    fdivrp                      # ST(1) = ST(1) / ST(0), pop -> ST(0)
+    fdivrp
     jmp .emo_save
 
 .emo_save:
-    fld %st(0)                  # Duplicate result: ST(0) for saving, ST(1) for format
-    fstpl acc_val(%rip)         # Save result into acc_val double
+    fld %st(0)
+    fstpl acc_val(%rip)
     lea disp_buf(%rip), %rdi
-    call format_double          # Format ST(0) float into disp_buf ASCII string
+    call format_double
     add $16, %rsp
     ret
 
 # ------------------------------------------------------------------------------
 # parse_double:
-# Parses an ASCII string into an 80-bit IEEE-754 floating point number on the
-# x87 FPU stack (ST(0)).
-#
-# Calling Convention:
-#   Input:   %rsi = Pointer to null-terminated string
-#   Output:  Parsed number loaded into ST(0)
-#   Scratch: %rax, %rdx, %r8d
-#
-# Parsing Algorithm:
-#   1. Skips leading whitespace.
-#   2. Checks for optional '-' sign; sets %r8d = 1 if negative.
-#   3. Accumulates integer digits: val = val * 10 + digit.
-#   4. If '.' encountered, loads integer part into FPU, then for each fractional
-#      digit divides by 10^k and accumulates into sum.
-#   5. Applies negative sign via fchs if %r8d was set.
+# Converts ASCII string at %rsi into 80-bit float in ST(0).
 # ------------------------------------------------------------------------------
 parse_double:
     sub $32, %rsp
-    movq $0, (%rsp)             # Scratch slot for integer part
-    movq $0, 8(%rsp)            # Scratch slot for fractional digits
+    movq $0, (%rsp)
+    movq $0, 8(%rsp)
 
-    xor %rax, %rax              # %rax = accumulated integer part
-    xor %r8d, %r8d              # %r8d = sign flag (0 = positive, 1 = negative)
+    xor %rax, %rax
+    xor %r8d, %r8d
 
 .pd_skip_ws:
-    cmpb $' ', (%rsi)           # Skip spaces
+    cmpb $' ', (%rsi)
     jne .pd_chk_sign
     inc %rsi
     jmp .pd_skip_ws
 
 .pd_chk_sign:
-    cmpb $'-', (%rsi)           # Check for minus sign
+    cmpb $'-', (%rsi)
     jne .pd_start
     inc %rsi
-    mov $1, %r8d                # Set sign flag to negative
+    mov $1, %r8d
 
 .pd_start:
 .pd_int:
-    movzbq (%rsi), %rdx         # Read next ASCII character
+    movzbq (%rsi), %rdx
     test %dl, %dl
-    jz .pd_finish               # Null terminator: end of integer part
+    jz .pd_finish
     cmpb $'.', %dl
-    je .pd_frac_start           # Decimal point: start fractional part
+    je .pd_frac_start
     cmpb $'0', %dl
     jl .pd_finish
     cmpb $'9', %dl
     jg .pd_finish
 
-    # Accumulate digit: %rax = %rax * 10 + (%rdx - '0')
     sub $'0', %rdx
     imul $10, %rax
     add %rdx, %rax
@@ -569,12 +475,12 @@ parse_double:
     jmp .pd_int
 
 .pd_frac_start:
-    inc %rsi                    # Skip '.' character
+    inc %rsi
     mov %rax, (%rsp)
-    fildq (%rsp)                # Load integer part onto FPU stack: ST(2) = int
+    fildq (%rsp)
 
-    fldz                        # ST(1) = sum (0.0)
-    fld1                        # ST(0) = divisor (1.0)
+    fldz
+    fld1
 .pd_frac:
     movzbq (%rsi), %rdx
     test %dl, %dl
@@ -584,129 +490,106 @@ parse_double:
     cmpb $'9', %dl
     jg .pd_frac_end
 
-    # Divisor = Divisor * 10.0
     sub $'0', %rdx
     fmull fp_ten(%rip)
     mov %rdx, 8(%rsp)
-    fildq 8(%rsp)               # Load current digit: ST(0) = digit
-    fdiv %st(1), %st(0)         # digit / divisor
-    faddp %st(0), %st(2)        # sum = sum + (digit / divisor)
+    fildq 8(%rsp)
+    fdiv %st(1), %st(0)
+    faddp %st(0), %st(2)
 
     inc %rsi
     jmp .pd_frac
 
 .pd_frac_end:
-    fstp %st(0)                 # Pop divisor
-    faddp                       # ST(0) = sum + int
-    test %r8d, %r8d             # Check sign flag
+    fstp %st(0)
+    faddp
+    test %r8d, %r8d
     jz .pd_done
-    fchs                        # Invert sign to negative
+    fchs
 .pd_done:
     add $32, %rsp
     ret
 
 .pd_finish:
-    # No fractional part: load integer directly to FPU
     mov %rax, (%rsp)
     fildq (%rsp)
     test %r8d, %r8d
     jz .pd_done
-    fchs                        # Invert sign to negative
+    fchs
     jmp .pd_done
 
 # ------------------------------------------------------------------------------
 # format_double:
-# Converts an 80-bit float in ST(0) into a clean, human-readable ASCII string.
-#
-# Calling Convention:
-#   Input:   Float in ST(0), %rdi = destination buffer pointer
-#   Output:  Pops ST(0), writes null-terminated string at %rdi
-#
-# Formatting Algorithm:
-#   1. Tests float status using fxam / fnstsw for NaN or Infinity -> "Error".
-#   2. Tests sign via ftst; outputs '-' and negates float if negative.
-#   3. Truncates integer part with fisttpq; converts to string via int_to_str.
-#   4. Subtracts integer part to get fractional remainder: frac = float - int.
-#   5. If frac < epsilon (1e-8), omits decimal point.
-#   6. Otherwise, outputs '.' and iterates up to 6 decimal digits (frac *= 10).
-#   7. Strips unnecessary trailing zeroes (e.g. "3.500000" -> "3.5").
+# Formats ST(0) float into ASCII string at %rdi.
 # ------------------------------------------------------------------------------
 format_double:
     sub $64, %rsp
-    mov %rdi, 32(%rsp)          # Save start pointer for trailing-zero stripping
+    mov %rdi, 32(%rsp)
 
-    # Check for NaN / Infinity using x87 fxam instruction
     fxam
     fnstsw %ax
     and $0x4500, %ax
-    cmp $0x0100, %ax            # Condition code: NaN
+    cmp $0x0100, %ax
     je .fd_nan
-    cmp $0x0500, %ax            # Condition code: Infinity
+    cmp $0x0500, %ax
     je .fd_nan
 
-    # Test float sign
     ftst
     fnstsw %ax
     sahf
-    jnc .fd_pos                 # If not carry, value is >= 0.0
-    movb $'-', (%rdi)           # Append minus sign
+    jnc .fd_pos
+    movb $'-', (%rdi)
     inc %rdi
-    fchs                        # Make positive for digit extraction
+    fchs
 
 .fd_pos:
-    # Extract integer part using fisttpq (SSE3/x87 truncate to 64-bit int)
     fld %st(0)
-    fisttpq 8(%rsp)             # 8(%rsp) = integer part, ST(0) = full float
+    fisttpq 8(%rsp)
     mov 8(%rsp), %rax
-    call int_to_str             # Format integer part; advances %rdi
+    call int_to_str
 
-    # Compute fractional remainder: ST(0) - integer_part
-    fildq 8(%rsp)               # ST(0) = integer part, ST(1) = full float
-    fsubrp                      # ST(0) = full float - integer part = fraction
+    fildq 8(%rsp)
+    fsubrp
 
-    # Check if fractional remainder is virtually zero (< 1e-8)
     fldl fp_eps(%rip)
-    fcomip %st(1), %st(0)       # Compare eps with fraction and pop eps
+    fcomip %st(1), %st(0)
     jb .fd_has_frac
 
-    # Fractional part is negligible: pop remainder and finish string
     fstp %st(0)
     movb $0, (%rdi)
     add $64, %rsp
     ret
 
 .fd_has_frac:
-    movb $'.', (%rdi)           # Write decimal point
+    movb $'.', (%rdi)
     inc %rdi
 
-    mov $6, %ecx                # Maximum 6 decimal places
+    mov $6, %ecx
 .fd_frac_loop:
-    fmull fp_ten(%rip)          # frac = frac * 10.0
+    fmull fp_ten(%rip)
     fld %st(0)
-    fisttpq 16(%rsp)            # Extract digit via truncation
+    fisttpq 16(%rsp)
     mov 16(%rsp), %rax
     add $'0', %al
-    movb %al, (%rdi)            # Write decimal digit
+    movb %al, (%rdi)
     inc %rdi
 
     fildq 16(%rsp)
-    fsubrp                      # frac = frac - digit
+    fsubrp
 
-    # Check if remaining fraction has dropped below epsilon
     fldl fp_eps(%rip)
     fcomip %st(1), %st(0)
     jbe .fd_frac_cont
-    jmp .fd_pop_frac            # Remainder is zero, stop loop early
+    jmp .fd_pop_frac
 
 .fd_frac_cont:
     dec %ecx
     jnz .fd_frac_loop
 
 .fd_pop_frac:
-    fstp %st(0)                 # Pop remaining fraction
-    movb $0, (%rdi)             # Null terminate
+    fstp %st(0)
+    movb $0, (%rdi)
 
-    # Clean up trailing zeros after decimal point
     dec %rdi
 .strip_loop:
     mov 32(%rsp), %rax
@@ -714,12 +597,12 @@ format_double:
     jle .fd_done
     cmpb $'0', (%rdi)
     jne .strip_check_dot
-    movb $0, (%rdi)             # Erase trailing '0'
+    movb $0, (%rdi)
     dec %rdi
     jmp .strip_loop
 
 .strip_check_dot:
-    cmpb $'.', (%rdi)           # If entire fraction was stripped, erase '.'
+    cmpb $'.', (%rdi)
     jne .fd_done
     movb $0, (%rdi)
 
@@ -728,8 +611,7 @@ format_double:
     ret
 
 .fd_nan:
-    # Overflow or Invalid Math: Output "Error"
-    fstp %st(0)                 # Pop invalid float
+    fstp %st(0)
     lea str_err_nan(%rip), %rsi
 .fd_nan_cpy:
     movb (%rsi), %al
@@ -743,21 +625,14 @@ format_double:
 
 # ------------------------------------------------------------------------------
 # int_to_str:
-# Converts an unsigned 64-bit integer into a decimal ASCII string.
-#
-# Calling Convention:
-#   Input:   %rax = 64-bit unsigned integer
-#            %rdi = destination buffer pointer
-#   Output:  %rdi advanced to point to the terminating null byte
-#   Scratch: %rbx, %rdx, %rsi
+# Converts unsigned 64-bit integer %rax to decimal string at %rdi.
 # ------------------------------------------------------------------------------
 int_to_str:
     sub $32, %rsp
     mov %rsp, %rsi
-    add $30, %rsi               # Work backwards from end of local stack buffer
-    movb $0, 1(%rsi)            # Set terminating null byte
+    add $30, %rsi
+    movb $0, 1(%rsi)
 
-    # Handle special case where input integer is 0
     test %rax, %rax
     jnz .its_loop
     movb $'0', (%rdi)
@@ -767,41 +642,67 @@ int_to_str:
     ret
 
 .its_loop:
-    xor %rdx, %rdx              # Clear high dividend for 64-bit div
+    xor %rdx, %rdx
     mov $10, %rbx
-    div %rbx                    # %rax = quotient, %rdx = remainder (digit)
+    div %rbx
     add $'0', %dl
-    movb %dl, (%rsi)            # Store ASCII digit
+    movb %dl, (%rsi)
     dec %rsi
     test %rax, %rax
     jnz .its_loop
 
-    inc %rsi                    # %rsi now points to the first character
+    inc %rsi
 .its_copy:
     movb (%rsi), %al
-    movb %al, (%rdi)            # Copy reversed digits into destination buffer
+    movb %al, (%rdi)
     inc %rdi
     inc %rsi
     test %al, %al
     jnz .its_copy
-    dec %rdi                    # %rdi points to '\0'
+    dec %rdi
     add $32, %rsp
+    ret
+
+# ------------------------------------------------------------------------------
+# scifn_prep:
+# Prepares history string for scientific functions:
+# Builds: hist_buf = prefix + disp_buf + ") ="
+# Input: %rsi -> null-terminated prefix string (e.g. "sin(")
+# ------------------------------------------------------------------------------
+scifn_prep:
+    push %rbx
+    lea hist_buf(%rip), %rdi
+.sp_p_cpy:
+    movb (%rsi), %al
+    movb %al, (%rdi)
+    test %al, %al
+    jz .sp_d_start
+    inc %rsi
+    inc %rdi
+    jmp .sp_p_cpy
+
+.sp_d_start:
+    lea disp_buf(%rip), %rsi
+.sp_d_cpy:
+    movb (%rsi), %al
+    movb %al, (%rdi)
+    test %al, %al
+    jz .sp_end
+    inc %rsi
+    inc %rdi
+    jmp .sp_d_cpy
+
+.sp_end:
+    movb $')', (%rdi)
+    movb $' ', 1(%rdi)
+    movb $'=', 2(%rdi)
+    movb $0, 3(%rdi)
+    pop %rbx
     ret
 
 # ------------------------------------------------------------------------------
 # exec_adv_key:
 # Dispatches keypad click events for Scientific Calculator mode.
-#
-# Keypad Grid Layout: 5 columns x 6 rows = 30 buttons (indices 0..29)
-#   Row 0:  0: sin,  1: C,    2: ⌫,   3: +/-,  4: ÷
-#   Row 1:  5: cos,  6: 7,    7: 8,   8: 9,    9: ×
-#   Row 2: 10: tan, 11: 4,   12: 5,  13: 6,   14: -
-#   Row 3: 15: √,   16: 1,   17: 2,  18: 3,   19: +
-#   Row 4: 20: π,   21: (,   22: 0,  23: .,   24: =
-#   Row 5: 25: e,   26: ln,  27: log,28: x²,  29: 1/x
-#
-# Calling Convention:
-#   Input:   %eax = Key index (0..29)
 # ------------------------------------------------------------------------------
 exec_adv_key:
     cmp $0, %eax; je .f_sin
@@ -841,118 +742,192 @@ exec_adv_key:
     cmp $29, %eax; je .f_inv
     ret
 
-# --- Scientific Trigonometric Functions (with Degree-to-Radian conversion) ---
+# --- Scientific Functions with Functional History & Auto-Commit ---
 .f_sin:
+    lea str_fn_sin(%rip), %rsi
+    call scifn_prep
     lea disp_buf(%rip), %rsi
-    call parse_double           # Load display value in degrees
-    fmull fp_deg2rad(%rip)      # Convert to radians: rad = deg * (pi / 180)
-    fsin                        # Compute sine
+    call parse_double
+    fmull fp_deg2rad(%rip)
+    fsin
     lea disp_buf(%rip), %rdi
-    call format_double          # Format result into disp_buf
+    call format_double
+    call commit_history
     movl $1, clr_next(%rip)
     ret
 
 .f_cos:
+    lea str_fn_cos(%rip), %rsi
+    call scifn_prep
     lea disp_buf(%rip), %rsi
     call parse_double
-    fmull fp_deg2rad(%rip)      # Convert to radians
-    fcos                        # Compute cosine
+    fmull fp_deg2rad(%rip)
+    fcos
     lea disp_buf(%rip), %rdi
     call format_double
+    call commit_history
     movl $1, clr_next(%rip)
     ret
 
 .f_tan:
+    lea str_fn_tan(%rip), %rsi
+    call scifn_prep
     lea disp_buf(%rip), %rsi
     call parse_double
-    fmull fp_deg2rad(%rip)      # Convert to radians
-    fptan                       # fptan computes tan and pushes 1.0, then tan
-    fstp %st(0)                 # Pop constant 1.0, leaving tan result on ST(0)
+    fmull fp_deg2rad(%rip)
+    fptan
+    fstp %st(0)
     lea disp_buf(%rip), %rdi
     call format_double
+    call commit_history
     movl $1, clr_next(%rip)
     ret
 
-# --- Mathematical Constants ---
 .f_pi:
-    fldpi                       # Push Archimedes' constant pi onto FPU stack
+    lea hist_buf(%rip), %rdi
+    lea str_fn_pi(%rip), %rsi
+.pi_cp:
+    movb (%rsi), %al
+    movb %al, (%rdi)
+    inc %rsi
+    inc %rdi
+    test %al, %al
+    jnz .pi_cp
+
+    fldpi
     lea disp_buf(%rip), %rdi
     call format_double
+    call commit_history
     movl $1, clr_next(%rip)
     ret
 
 .f_e:
-    fldl fp_e(%rip)             # Push Euler's constant e onto FPU stack
+    lea hist_buf(%rip), %rdi
+    lea str_fn_e(%rip), %rsi
+.e_cp:
+    movb (%rsi), %al
+    movb %al, (%rdi)
+    inc %rsi
+    inc %rdi
+    test %al, %al
+    jnz .e_cp
+
+    fldl fp_e(%rip)
     lea disp_buf(%rip), %rdi
     call format_double
+    call commit_history
     movl $1, clr_next(%rip)
     ret
 
-# --- Algebraic Operations ---
 .f_sqrt:
+    lea str_fn_sqrt(%rip), %rsi
+    call scifn_prep
     lea disp_buf(%rip), %rsi
     call parse_double
-    fsqrt                       # Compute square root
+    fsqrt
     lea disp_buf(%rip), %rdi
     call format_double
+    call commit_history
     movl $1, clr_next(%rip)
     ret
 
 .f_sq:
+    # Build hist_buf: disp_buf + "^2 ="
+    lea hist_buf(%rip), %rdi
+    lea disp_buf(%rip), %rsi
+.sq_cp:
+    movb (%rsi), %al
+    movb %al, (%rdi)
+    inc %rsi
+    inc %rdi
+    test %al, %al
+    jnz .sq_cp
+    dec %rdi
+    movb $'^', (%rdi)
+    movb $'2', 1(%rdi)
+    movb $' ', 2(%rdi)
+    movb $'=', 3(%rdi)
+    movb $0, 4(%rdi)
+
     lea disp_buf(%rip), %rsi
     call parse_double
     fld %st(0)
-    fmulp                       # Compute square: x * x
+    fmulp
     lea disp_buf(%rip), %rdi
     call format_double
+    call commit_history
     movl $1, clr_next(%rip)
     ret
 
 .f_inv:
+    lea str_fn_inv(%rip), %rsi
+    call scifn_prep
     lea disp_buf(%rip), %rsi
     call parse_double
-    fld1                        # Push 1.0: ST(0) = 1.0, ST(1) = x
-    fdivp                       # Compute reciprocal: 1.0 / x
+    fld1
+    fdivp
     lea disp_buf(%rip), %rdi
     call format_double
+    call commit_history
     movl $1, clr_next(%rip)
     ret
 
-# --- Logarithms (via x87 fyl2x instruction: ST(1) * log2(ST(0))) ---
 .f_ln:
-    fldln2                      # Push ln(2): ST(0) = ln(2)
+    lea str_fn_ln(%rip), %rsi
+    call scifn_prep
+    fldln2
     lea disp_buf(%rip), %rsi
-    call parse_double           # ST(0) = x, ST(1) = ln(2)
-    fyl2x                       # ln(x) = ln(2) * log2(x)
+    call parse_double
+    fyl2x
     lea disp_buf(%rip), %rdi
     call format_double
+    call commit_history
     movl $1, clr_next(%rip)
     ret
 
 .f_log:
-    fldlg2                      # Push log10(2): ST(0) = log10(2)
+    lea str_fn_log(%rip), %rsi
+    call scifn_prep
+    fldlg2
     lea disp_buf(%rip), %rsi
-    call parse_double           # ST(0) = x, ST(1) = log10(2)
-    fyl2x                       # log10(x) = log10(2) * log2(x)
+    call parse_double
+    fyl2x
     lea disp_buf(%rip), %rdi
     call format_double
+    call commit_history
     movl $1, clr_next(%rip)
+    ret
+
+# ------------------------------------------------------------------------------
+# prog_op_prep:
+# Prepares history for programmer bitwise operations.
+# Input: %rsi -> operator string (e.g. " & ")
+# ------------------------------------------------------------------------------
+prog_op_prep:
+    push %rsi
+    lea hist_buf(%rip), %rdi
+    lea disp_buf(%rip), %rsi
+.pop_cp:
+    movb (%rsi), %al
+    movb %al, (%rdi)
+    inc %rsi
+    inc %rdi
+    test %al, %al
+    jnz .pop_cp
+    dec %rdi
+    pop %rsi
+.pop_s_cp:
+    movb (%rsi), %al
+    movb %al, (%rdi)
+    inc %rsi
+    inc %rdi
+    test %al, %al
+    jnz .pop_s_cp
     ret
 
 # ------------------------------------------------------------------------------
 # exec_prog_key:
 # Dispatches keypad click events for Programmer Calculator mode.
-#
-# Keypad Grid Layout: 5 columns x 6 rows = 30 buttons (indices 0..29)
-#   Row 0:  0: &,   1: |,    2: ^,   3: ~,   4: C
-#   Row 1:  5: <<,  6: >>,   7: A,   8: B,   9: ⌫
-#   Row 2: 10: 7,  11: 8,   12: 9,  13: C,  14: ÷
-#   Row 3: 15: 4,  16: 5,   17: 6,  18: D,  19: ×
-#   Row 4: 20: 1,  21: 2,   22: 3,  23: E,  24: -
-#   Row 5: 25: 0,  26: +/-, 27: =,  28: F,  29: +
-#
-# Calling Convention:
-#   Input:   %eax = Key index (0..29)
 # ------------------------------------------------------------------------------
 exec_prog_key:
     cmp $0, %eax; je .p_and
@@ -992,7 +967,6 @@ exec_prog_key:
     cmp $29, %eax; je op_add
     ret
 
-# --- Hexadecimal Digit Appenders (A through F) ---
 .hex_A: movb $'A', %al; call append_disp_char; call update_prog_readouts; ret
 .hex_B: movb $'B', %al; call append_disp_char; call update_prog_readouts; ret
 .hex_C: movb $'C', %al; call append_disp_char; call update_prog_readouts; ret
@@ -1000,63 +974,108 @@ exec_prog_key:
 .hex_E: movb $'E', %al; call append_disp_char; call update_prog_readouts; ret
 .hex_F: movb $'F', %al; call append_disp_char; call update_prog_readouts; ret
 
-# --- Programmer Bitwise Operator Setters ---
 .p_and:
     call parse_int64
-    mov %rax, acc_int(%rip)      # Save first operand in integer accumulator
-    movl $7, pending_op(%rip)    # Opcode 7 = Bitwise AND (&)
+    mov %rax, acc_int(%rip)
+    lea str_sym_and(%rip), %rsi
+    call prog_op_prep
+    movl $7, pending_op(%rip)
     movl $1, clr_next(%rip)
     ret
 
 .p_or:
     call parse_int64
     mov %rax, acc_int(%rip)
-    movl $8, pending_op(%rip)    # Opcode 8 = Bitwise OR (|)
+    lea str_sym_or(%rip), %rsi
+    call prog_op_prep
+    movl $8, pending_op(%rip)
     movl $1, clr_next(%rip)
     ret
 
 .p_xor:
     call parse_int64
     mov %rax, acc_int(%rip)
-    movl $9, pending_op(%rip)    # Opcode 9 = Bitwise XOR (^)
+    lea str_sym_xor(%rip), %rsi
+    call prog_op_prep
+    movl $9, pending_op(%rip)
     movl $1, clr_next(%rip)
     ret
 
 .p_not:
+    # Build hist_buf: "~" + disp_buf + " ="
+    lea hist_buf(%rip), %rdi
+    movb $'~', (%rdi)
+    inc %rdi
+    lea disp_buf(%rip), %rsi
+.pnot_cp:
+    movb (%rsi), %al
+    movb %al, (%rdi)
+    inc %rsi
+    inc %rdi
+    test %al, %al
+    jnz .pnot_cp
+    dec %rdi
+    movb $' ', (%rdi)
+    movb $'=', 1(%rdi)
+    movb $0, 2(%rdi)
+
     call parse_int64
-    not %rax                     # Invert all 64 bits (~x)
+    not %rax
     mov %rax, %rdi
     lea disp_buf(%rip), %rsi
-    call format_current_base     # Format according to active base
-    call update_prog_readouts    # Update live multi-base inspector
+    call format_current_base
+    call update_prog_readouts
+    call commit_history
     movl $1, clr_next(%rip)
     ret
 
 .p_shl:
     call parse_int64
     mov %rax, acc_int(%rip)
-    movl $10, pending_op(%rip)   # Opcode 10 = Shift Left (<<)
+    lea str_sym_shl(%rip), %rsi
+    call prog_op_prep
+    movl $10, pending_op(%rip)
     movl $1, clr_next(%rip)
     ret
 
 .p_shr:
     call parse_int64
     mov %rax, acc_int(%rip)
-    movl $11, pending_op(%rip)   # Opcode 11 = Shift Right (>>)
+    lea str_sym_shr(%rip), %rsi
+    call prog_op_prep
+    movl $11, pending_op(%rip)
     movl $1, clr_next(%rip)
     ret
 
 # ------------------------------------------------------------------------------
 # eval_prog_op:
 # Evaluates 64-bit integer arithmetic and bitwise operations in Programmer Mode.
-# Operands:
-#   First operand:  acc_int
-#   Second operand: parse_int64(disp_buf)
 # ------------------------------------------------------------------------------
 eval_prog_op:
+    # Append disp_buf + " =" to hist_buf
+    lea hist_buf(%rip), %rdi
+.epo_end:
+    cmpb $0, (%rdi)
+    jz .epo_cp
+    inc %rdi
+    jmp .epo_end
+.epo_cp:
+    lea disp_buf(%rip), %rsi
+.epo_cp2:
+    movb (%rsi), %al
+    movb %al, (%rdi)
+    inc %rsi
+    inc %rdi
+    test %al, %al
+    jnz .epo_cp2
+    dec %rdi
+    movb $' ', (%rdi)
+    movb $'=', 1(%rdi)
+    movb $0, 2(%rdi)
+
     call parse_int64
-    mov %rax, %rbx              # %rbx = second operand
-    mov acc_int(%rip), %rax     # %rax = first operand
+    mov %rax, %rbx              # Second operand
+    mov acc_int(%rip), %rax     # First operand
 
     mov pending_op(%rip), %ecx
     cmp $1, %ecx; je .po_add
@@ -1074,20 +1093,20 @@ eval_prog_op:
 .po_sub: sub %rbx, %rax; jmp .po_done
 .po_mul: imul %rbx, %rax; jmp .po_done
 .po_div:
-    test %rbx, %rbx             # Guard against integer division by zero
+    test %rbx, %rbx
     jz .po_div_zero
-    xor %rdx, %rdx              # Clear high bits for signed division
+    xor %rdx, %rdx
     idiv %rbx
     jmp .po_done
 .po_div_zero:
-    xor %rax, %rax              # Set result to 0 on division by zero
+    xor %rax, %rax
     jmp .po_done
 
 .po_and: and %rbx, %rax; jmp .po_done
 .po_or:  or %rbx, %rax;  jmp .po_done
 .po_xor: xor %rbx, %rax; jmp .po_done
 .po_shl:
-    mov %bl, %cl                # Shift count must be in %cl register
+    mov %bl, %cl
     shl %cl, %rax
     jmp .po_done
 .po_shr:
@@ -1096,22 +1115,18 @@ eval_prog_op:
     jmp .po_done
 
 .po_done:
-    mov %rax, acc_int(%rip)      # Store result in accumulator
+    mov %rax, acc_int(%rip)
     mov %rax, %rdi
     lea disp_buf(%rip), %rsi
-    call format_current_base     # Format result in active radix
-    call update_prog_readouts    # Refresh all 4 multi-base displays
-    movl $0, pending_op(%rip)    # Reset operator
-    movl $1, clr_next(%rip)      # Flag clear-on-next
+    call format_current_base
+    call update_prog_readouts
+    call commit_history         # Record into history journal!
+    movl $0, pending_op(%rip)
+    movl $1, clr_next(%rip)
     ret
 
 # ------------------------------------------------------------------------------
 # format_current_base:
-# Formats integer %rdi into buffer %rsi according to curr_base setting:
-#   curr_base = 0: Hexadecimal (format_hex_raw)
-#   curr_base = 1: Decimal     (format_dec)
-#   curr_base = 2: Octal       (format_oct_raw)
-#   curr_base = 3: Binary      (format_bin_raw)
 # ------------------------------------------------------------------------------
 format_current_base:
     mov curr_base(%rip), %eax
@@ -1121,33 +1136,27 @@ format_current_base:
     cmp $3, %eax; je format_bin_raw
     jmp format_dec
 
-# ------------------------------------------------------------------------------
-# format_hex_raw:
-# Formats 64-bit integer %rdi as clean hexadecimal string without '0x' prefix
-# into buffer %rsi, skipping leading zeroes.
-# ------------------------------------------------------------------------------
 format_hex_raw:
     mov %rdi, %rax
     mov %rsi, %rdi
-    mov $16, %ecx               # Up to 16 hex nibbles in 64 bits
+    mov $16, %ecx
 .fhr_l:
     dec %ecx
     js .fhr_zero
     mov %rax, %rdx
-    shr $60, %rdx               # Extract topmost nibble
-    shl $4, %rax                # Shift next nibble to top
+    shr $60, %rdx
+    shl $4, %rax
     test %rdx, %rdx
-    jz .fhr_l                   # Skip leading zeroes
+    jz .fhr_l
     jmp .fhr_emit
 
 .fhr_zero:
-    # All bits were zero: emit single '0'
     movb $'0', (%rdi)
     movb $0, 1(%rdi)
     ret
 
 .fhr_emit:
-    cmp $10, %dl                # Convert nibble to ASCII character ('0'-'9', 'A'-'F')
+    cmp $10, %dl
     jl .fhr_d
     add $'A' - 10, %dl
     jmp .fhr_w
@@ -1166,11 +1175,6 @@ format_hex_raw:
     movb $0, (%rdi)
     ret
 
-# ------------------------------------------------------------------------------
-# format_oct_raw:
-# Formats 64-bit integer %rdi as clean octal string without '0o' prefix
-# into buffer %rsi, skipping leading zeroes.
-# ------------------------------------------------------------------------------
 format_oct_raw:
     mov %rdi, %rax
     mov %rsi, %rdi
@@ -1181,17 +1185,17 @@ format_oct_raw:
 
     test %rax, %rax
     jnz .for_loop
-    movb $'0', (%rdi)           # Handle zero case
+    movb $'0', (%rdi)
     movb $0, 1(%rdi)
     add $32, %rsp
     ret
 
 .for_loop:
     mov %rax, %rdx
-    and $7, %rdx                # Extract lowest 3 bits
-    shr $3, %rax                # Shift out octal digit
+    and $7, %rdx
+    shr $3, %rax
     add $'0', %dl
-    movb %dl, (%rsi)            # Store ASCII digit in reverse
+    movb %dl, (%rsi)
     dec %rsi
     test %rax, %rax
     jnz .for_loop
@@ -1207,31 +1211,23 @@ format_oct_raw:
     add $32, %rsp
     ret
 
-# ------------------------------------------------------------------------------
-# format_bin_raw:
-# Formats 64-bit integer %rdi as clean binary string without prefix
-# into buffer %rsi, skipping leading zeroes.
-# ------------------------------------------------------------------------------
 format_bin_raw:
     mov %rdi, %rax
     mov %rsi, %rdi
-
-    # Find Most Significant Bit (MSB) that is set
     mov $63, %ecx
 .fbr_find:
-    bt %rcx, %rax               # Bit Test
+    bt %rcx, %rax
     jc .fbr_found
     dec %ecx
     jns .fbr_find
 
-    # All bits are zero: emit single '0'
     movb $'0', (%rdi)
     movb $0, 1(%rdi)
     ret
 
 .fbr_found:
 .fbr_emit:
-    bt %rcx, %rax               # Test bit at index %rcx
+    bt %rcx, %rax
     jc .fbr_one
     movb $'0', (%rdi)
     jmp .fbr_nxt
@@ -1241,23 +1237,18 @@ format_bin_raw:
     inc %rdi
     dec %ecx
     jns .fbr_emit
-    movb $0, (%rdi)             # Null terminate
+    movb $0, (%rdi)
     ret
 
-# ------------------------------------------------------------------------------
-# parse_int64:
-# Parses numeric string in disp_buf into a 64-bit integer in %rax according
-# to active radix (curr_base: 0=HEX, 1=DEC, 2=OCT, 3=BIN).
-# ------------------------------------------------------------------------------
 parse_int64:
     lea disp_buf(%rip), %rsi
-    xor %rax, %rax              # %rax = accumulated integer
+    xor %rax, %rax
     mov curr_base(%rip), %r8d
 
 .pi_loop:
     movzbq (%rsi), %rdx
     test %dl, %dl
-    jz .pi_done                 # Stop at null terminator
+    jz .pi_done
 
     cmp $0, %r8d
     je .pi_hex
@@ -1266,7 +1257,6 @@ parse_int64:
     cmp $3, %r8d
     je .pi_bin
 
-    # --- Base 10 (Decimal) ---
     cmpb $'0', %dl; jl .pi_done
     cmpb $'9', %dl; jg .pi_done
     sub $'0', %rdx
@@ -1276,7 +1266,6 @@ parse_int64:
     jmp .pi_loop
 
 .pi_hex:
-    # --- Base 16 (Hexadecimal: 0-9, A-F, a-f) ---
     cmpb $'0', %dl; jl .pi_done
     cmpb $'9', %dl; jle .pih_dig
     cmpb $'A', %dl; jl .pi_done
@@ -1293,27 +1282,25 @@ parse_int64:
 .pih_lower:
     sub $'a' - 10, %rdx
 .pih_accum:
-    shl $4, %rax                # Shift left 4 bits (multiply by 16)
+    shl $4, %rax
     add %rdx, %rax
     inc %rsi
     jmp .pi_loop
 
 .pi_oct:
-    # --- Base 8 (Octal: 0-7) ---
     cmpb $'0', %dl; jl .pi_done
     cmpb $'7', %dl; jg .pi_done
     sub $'0', %rdx
-    shl $3, %rax                # Shift left 3 bits (multiply by 8)
+    shl $3, %rax
     add %rdx, %rax
     inc %rsi
     jmp .pi_loop
 
 .pi_bin:
-    # --- Base 2 (Binary: 0-1) ---
     cmpb $'0', %dl; jl .pi_done
     cmpb $'1', %dl; jg .pi_done
     sub $'0', %rdx
-    shl $1, %rax                # Shift left 1 bit (multiply by 2)
+    shl $1, %rax
     add %rdx, %rax
     inc %rsi
     jmp .pi_loop
@@ -1321,32 +1308,23 @@ parse_int64:
 .pi_done:
     ret
 
-# ------------------------------------------------------------------------------
-# update_prog_readouts:
-# Updates all four live multi-base inspector buffers (hex_buf, dec_buf,
-# oct_buf, bin_buf) based on the current number entered in disp_buf.
-# ------------------------------------------------------------------------------
 update_prog_readouts:
     push %rbx
     call parse_int64
-    mov %rax, %rbx              # Preserve parsed 64-bit integer across calls
+    mov %rax, %rbx
 
-    # Update HEX readout buffer
     mov %rbx, %rdi
     lea hex_buf(%rip), %rsi
     call format_hex
 
-    # Update DEC readout buffer
     mov %rbx, %rdi
     lea dec_buf(%rip), %rsi
     call format_dec
 
-    # Update OCT readout buffer
     mov %rbx, %rdi
     lea oct_buf(%rip), %rsi
     call format_oct
 
-    # Update BIN readout buffer
     mov %rbx, %rdi
     lea bin_buf(%rip), %rsi
     call format_bin
@@ -1354,27 +1332,22 @@ update_prog_readouts:
     pop %rbx
     ret
 
-# ------------------------------------------------------------------------------
-# format_hex:
-# Formats integer %rdi as "0x" followed by 8 uppercase hexadecimal digits
-# (32-bit DWORD view) into buffer %rsi.
-# ------------------------------------------------------------------------------
 format_hex:
     movb $'0', (%rsi)
     movb $'x', 1(%rsi)
     add $2, %rsi
-    mov $8, %ecx                # Exactly 8 hex digits
+    mov $8, %ecx
 .fh_l:
     dec %ecx
     js .fh_d
     mov %rdi, %rax
     mov %ecx, %edx
-    shl $2, %edx                # Shift count = digit_index * 4
+    shl $2, %edx
     mov %edx, %ecx
     shr %cl, %rax
     mov %edx, %ecx
     shr $2, %ecx
-    and $0xF, %al               # Isolate 4-bit nibble
+    and $0xF, %al
     cmp $10, %al
     jl .fh_num
     add $'A' - 10, %al
@@ -1386,22 +1359,14 @@ format_hex:
     inc %rsi
     jmp .fh_l
 .fh_d:
-    movb $0, (%rsi)             # Null terminate
+    movb $0, (%rsi)
     ret
 
-# ------------------------------------------------------------------------------
-# format_dec:
-# Formats integer %rdi as standard decimal into buffer %rsi.
-# ------------------------------------------------------------------------------
 format_dec:
     mov %rdi, %rax
     mov %rsi, %rdi
     jmp int_to_str
 
-# ------------------------------------------------------------------------------
-# format_oct:
-# Formats integer %rdi as "0o" followed by octal digits into buffer %rsi.
-# ------------------------------------------------------------------------------
 format_oct:
     movb $'0', (%rsi)
     movb $'o', 1(%rsi)
@@ -1409,7 +1374,7 @@ format_oct:
     mov %rdi, %rax
     test %rax, %rax
     jnz .fo_nz
-    movb $'0', (%rsi)           # If value is 0, emit "0"
+    movb $'0', (%rsi)
     movb $0, 1(%rsi)
     ret
 
@@ -1441,13 +1406,8 @@ format_oct:
     add $32, %rsp
     ret
 
-# ------------------------------------------------------------------------------
-# format_bin:
-# Formats integer %rdi as 32-bit binary with a space separating each 8-bit byte:
-# "00000000 00000000 00000000 00000000" into buffer %rsi.
-# ------------------------------------------------------------------------------
 format_bin:
-    mov $32, %ecx               # 32 bits total
+    mov $32, %ecx
 .fb_l:
     dec %ecx
     js .fb_d
@@ -1458,7 +1418,6 @@ format_bin:
     movb %al, (%rsi)
     inc %rsi
 
-    # Insert byte separator space after every 8 bits (except at end)
     mov %ecx, %eax
     and $7, %eax
     jnz .fb_l
@@ -1469,5 +1428,5 @@ format_bin:
     jmp .fb_l
 
 .fb_d:
-    movb $0, (%rsi)             # Null terminate
+    movb $0, (%rsi)
     ret
