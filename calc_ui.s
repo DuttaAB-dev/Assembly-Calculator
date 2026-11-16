@@ -2100,7 +2100,7 @@ render_basic_keys:
     lea basic_key_labels(%rip), %rax
     movzbq (%rax, %r12), %rdx
     lea 36(%rdi), %edi
-    lea 24(%rsi), %esi
+    lea 28(%rsi), %esi
     mov $COL_TEXT_PRI, %r8d
     mov $2, %r9d                         # 2x enlarged scale
     call draw_glyph
@@ -2178,7 +2178,7 @@ render_adv_keys:
     movzbq (%rax, %r12), %rbx
 
     lea 27(%rdi), %edi
-    lea 17(%rsi), %esi
+    lea 21(%rsi), %esi
     mov %ebx, %edx
     mov $COL_TEXT_PRI, %r8d
     mov $2, %r9d
@@ -2255,7 +2255,7 @@ render_prog_keys:
     movzbq (%rax, %r12), %rbx
 
     lea 27(%rdi), %edi
-    lea 17(%rsi), %esi
+    lea 21(%rsi), %esi
     mov %ebx, %edx
     mov $COL_TEXT_PRI, %r8d
     mov $2, %r9d
