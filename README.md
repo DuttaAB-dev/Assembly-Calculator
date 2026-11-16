@@ -1,72 +1,126 @@
-# Autonomous Pure-Assembly Libadwaita Complex Calculator
+# Libadwaita Complex Calculator (Pure x86_64 Assembly)
 
-A multi-mode complex scientific & programming calculator created **exclusively in pure x86_64 Machine Assembly (`.s`) and raw binary (`.bin`)**.
+A modern, standalone desktop calculator built **100% in pure x86_64 Linux assembly**, adhering to GNOME's **Libadwaita** design language.
 
-Built from fundamental principles with **zero C, zero Python, zero external GUI toolkits, and zero human runtime libraries**.
-
----
-
-## Visual Architecture & Previews
-
-The application strictly implements the **GNOME 45+ Libadwaita Human Interface Guidelines (HIG)**:
-
-1. **CSD HeaderBar**: Custom client-side decoration headerbar with a hamburger menu button `≡`, centered title, and circular close button `x` (`#3A3A3A`, hover `#E01B24`). Suppresses window manager titlebars via `_MOTIF_WM_HINTS = {2, 0, 0, 0, 0}` and supports native window dragging via `_NET_WM_MOVERESIZE`.
-2. **Popover Submenu**: Floating Libadwaita popover menu card with 12px corner radius, drop shadow, active radio indicators (`●` / `○`), and destructive actions (`Clear History`).
-3. **Inset OLED Display Card**: Deep black card (`#1E1E1E`) with subtle 1px border (`#333333`) and 12px corner radii.
-4. **Tactile Squircle Keypads**: Rounded buttons (radius 10px) with 1px highlight outlines, drop shadows, and responsive states (idle, hover, active).
-
-### Supported Calculator Modes
-
-- **Basic Calculator**: Full arithmetic evaluation (`+`, `-`, `×`, `÷`, `+/-`, `(`, `0`–`9`, `.`, `=`), double-precision floating point with decimal fraction support, chained operations (`12 + 34 + 5`), and expression history.
-- **Scientific Calculator**: Hardware x87 FPU trigonometric routines (`sin`, `cos`, `tan`), natural and common logarithms (`ln`, `log`), powers & roots (`x²`, `1/x`, `√`), and constants ($\pi$, $e$).
-- **Programming Calculator**: 64-bit integer bitwise operations (`AND`, `OR`, `XOR`, `NOT`, `<<`, `>>`), hexadecimal input (`A`–`F`), integer arithmetic (`+`, `-`, `×`, `÷`), and a **live 4-base inspector** with clickable active base switching (`HEX`, `DEC`, `OCT`, `BIN`).
+> **Zero C, Zero External Libraries, Zero Toolkits**:
+> This application does **not** link against libc, Xlib, XCB, Cairo, GTK, or any runtime helper. It interacts directly with the Linux kernel via syscalls and speaks the raw binary X11 wire protocol over a UNIX domain socket.
 
 ---
 
-## File Structure
+## Features
 
-| File | Type | Description | Size |
-| :--- | :--- | :--- | :--- |
-| [`font.bin`](font.bin) | Binary | Synthesized 8x16 bitmap font covering ASCII 32–136 | 1.6 KB |
-| [`calc_ui.s`](calc_ui.s) | x86_64 Assembly | Raw X11 wire socket, CSD hints, framebuffer blitter, squircle rasterizer, Popover menu, event dispatcher | 39 KB |
-| [`calc_core.s`](calc_core.s) | x86_64 Assembly | x87 FPU math engine, 64-bit bitwise logic, string parsing, multi-base formatting | 26 KB |
-| [`Makefile`](Makefile) | Build | Direct invocation of `as` and `ld` (no compiler needed) | 325 B |
-| [`calculator`](calculator) | ELF Executable | **Statically linked, stripped standalone binary** | **19.6 KB** |
+- **Libadwaita Dark Design System**:
+  - Exact Adwaita color palette (window background `#242424`, display card `#1E1E1E`, buttons `#323232`, accent blue `#3584E4`, destructive red `#E01B24`).
+  - Client-Side Decorations (CSD): Custom headerbar with title, hamburger menu, and close button, with window decorations suppressed via `_MOTIF_WM_HINTS`.
+  - Window Dragging: Native interactive window movement via EWMH `_NET_WM_MOVERESIZE`.
+  - Physical Window Rounded Corners: Physical window clipped to $r=16\text{px}$ using the **X11 Shape Extension** (`ShapeRectangles`).
+  - Smooth Antialiased Squircles: Custom rasterizer for rounded corners ($cx^2 + cy^2 \le r^2$) with 1px borders across all buttons, cards, and popovers.
+  - Enlarged Bold Typography: Modern $8\times 16$ bitmap glyphs synthesized from `AdwaitaMono-Bold.ttf`, rendered with integer scaling ($2\times$) and boundary clipping.
+
+- **Three Operational Modes**:
+  - **Basic Mode**: Standard 4x5 keypad layout with operator chaining, display history, and sign inversion.
+  - **Scientific Mode**: 5x6 keypad layout with degree/radian trigonometric functions ($\sin$, $\cos$, $\tan$), constants ($\pi$, $e$), powers ($x^2$, $\sqrt{x}$, $1/x$), and logarithms ($\ln$, $\log_{10}$).
+  - **Programmer Mode**: 5x6 keypad layout with 64-bit integer signed arithmetic, bitwise logic (`&`, `|`, `^`, `~`, `<<`, `>>`), hexadecimal entry (`A`–`F`), and a live synchronized 4-base inspector displaying **HEX**, **DEC**, **OCT**, and **BIN** representations.
+
+- **Headless CI & Testing**:
+  - Command-line flag `--dump <output.ppm> [mode] [menu]` renders full frames to Netpbm PPM image files without needing a running X server or display connection.
 
 ---
 
-## Build and Execution
+## Architectural Breakdown
 
-### Assemble & Link (Pure `as` + `ld`)
+```
+Assembly-Calculator/
+├── calc_ui.s      # UI Subsystem, Direct X11 Socket Driver & Software Rasterizer
+├── calc_core.s    # Arithmetic Engine, x87 FPU Math, Radix Formatters & Keypad Dispatch
+├── font.bin       # Embedded 104-glyph 8x16 bitmap typography font
+├── Makefile       # Standalone build automation (as + ld + strip)
+└── README.md      # Comprehensive architecture and technical documentation
+```
+
+### 1. `calc_ui.s` (UI & X11 Driver)
+- **Kernel Interface**: Uses direct x86_64 Linux syscalls (`sys_mmap`, `sys_socket`, `sys_connect`, `sys_poll`, `sys_read`, `sys_write`, `sys_open`, `sys_close`, `sys_exit`).
+- **Memory Allocation**: Allocates an anonymous $420 \times 680 \times 4$ byte 32-bit ARGB framebuffer using `sys_mmap`.
+- **Authentication**: Directly parses `~/.Xauthority` searching for `MIT-MAGIC-COOKIE-1` binary keys without helper utilities.
+- **X11 Protocol Client**:
+  - Sends little-endian connection setup packet to `/tmp/.X11-unix/X0`.
+  - Dynamically interns required X11 atoms (`WM_PROTOCOLS`, `WM_DELETE_WINDOW`, `_MOTIF_WM_HINTS`, `_NET_WM_MOVERESIZE`, etc.).
+  - Creates the top-level window (`CreateWindow`), graphics context (`CreateGC`), and sets CSD hints.
+  - Configures physical window rounded corners via `QueryExtension "SHAPE"` and `ShapeRectangles` (minor opcode 1) with 33 clipping rectangles.
+  - Pushes rendered framebuffer frames to screen in 32-row slices via `PutImage` (ZPixmap format, 24/32-bit depth).
+- **Software Graphics Engine**:
+  - `draw_rect`: Solid color fills using `rep stosl`.
+  - `draw_squircle`: Evaluates Euclidean distance $(x - cx)^2 + (y - cy)^2 \le r^2$ with 1px border generation and clipping.
+  - `draw_glyph`: $8\times 16$ font glyphs rendered with arbitrary integer scaling ($scale \times scale$) and screen-boundary protection.
+  - `draw_string`: Null-terminated string rendering with horizontal cursor advancement.
+- **Event Dispatcher**:
+  - Polls socket with `sys_poll` (20ms timeout).
+  - Handles `Expose`, `MotionNotify`, `ButtonPress`, `ButtonRelease`, `KeyPress`, and `ClientMessage` (`WM_DELETE_WINDOW`).
+
+### 2. `calc_core.s` (Arithmetic Engine)
+- **Display Buffer Operations**: `append_disp_char`, `clear_disp`, `bksp_disp`, `toggle_sign`.
+- **Floating-Point Engine**:
+  - Evaluates expressions on the 80-bit x87 FPU stack (`faddp`, `fsubrp`, `fmulp`, `fdivrp`, `fchs`, `fsin`, `fcos`, `fptan`, `fsqrt`, `fyl2x`).
+  - Guards against division by zero via `fcomip` and reports "Cannot divide by 0".
+  - Detects NaN and Infinity overflow using `fxam` + `fnstsw` and reports "Error".
+- **ASCII Number Conversions**:
+  - `parse_double`: Converts ASCII strings to 80-bit IEEE-754 floats on `ST(0)`.
+  - `format_double`: Formats `ST(0)` float into human-readable string, truncating integer part with `fisttpq`, extracting up to 6 decimal digits, and stripping trailing zeros.
+  - `int_to_str`: Converts unsigned 64-bit integer to decimal string.
+  - `parse_int64`: Radix-aware parser supporting HEX (0-9, A-F), DEC, OCT (0-7), and BIN (0-1).
+- **Programmer Multi-Base Formatters**:
+  - Synchronously updates four distinct readout buffers: `hex_buf` (`0xXXXXXXXX`), `dec_buf`, `oct_buf` (`0o...`), and `bin_buf` (`XXXXXXXX XXXXXXXX XXXXXXXX XXXXXXXX`).
+
+---
+
+## Building and Running
+
+### Prerequisites
+- Linux x86_64
+- GNU Assembler (`as`) and GNU Linker (`ld`) (available via `binutils` on all Linux distributions)
+- An active X11 or Xwayland display server (for GUI mode)
+
+### Build
+Compile, link, and strip the binary:
 ```bash
 make clean && make
 ```
+The resulting executable is a standalone, statically linked ELF binary (`calculator`) with zero runtime dependencies.
 
 ### Run
+Launch the calculator GUI:
 ```bash
 ./calculator
 ```
 
-### Headless Verification Frame Dump
+### Headless Verification (Frame Dump)
+To render and verify the UI headlessly without an X server:
 ```bash
-# Dump Basic Mode
+# Dump all modes and popover menu to PPM image files
+make dump
+
+# Or specify custom modes directly:
+# ./calculator --dump <filename.ppm> [mode: 0=Basic, 1=Scientific, 2=Programmer] [menu: 'm']
 ./calculator --dump preview_basic.ppm 0
-
-# Dump Scientific Mode
 ./calculator --dump preview_adv.ppm 1
-
-# Dump Programming Mode with 4-Base Readouts
 ./calculator --dump preview_prog.ppm 2
-
-# Dump Popover Submenu
 ./calculator --dump preview_menu.ppm 0 m
 ```
 
-### Verify Zero Dependencies
-```bash
-$ file ./calculator
-calculator: ELF 64-bit LSB executable, x86-64, version 1 (SYSV), statically linked, stripped
+---
 
-$ ldd ./calculator
-not a dynamic executable
-```
+## Keyboard Shortcuts
+
+| Key | Action |
+|:---|:---|
+| `0` – `9` | Enter digit |
+| `.` | Enter decimal point |
+| `+`, `-`, `*`, `/` | Arithmetic operators |
+| `Enter` / `Numpad Enter` | Evaluate expression (`=`) |
+| `BackSpace` | Delete last entered character |
+| `Escape` / `c` | Clear display and reset state (`C`) |
+
+---
+
+## License
+MIT License. Free for educational, research, and production use.
