@@ -5,6 +5,9 @@
 # Toolchain: GNU Assembler (as) and GNU Linker (ld).
 # ==============================================================================
 
+VERSION ?= 1.0.0
+PKG_NAME := assembly-calculator-v$(VERSION)-linux-x86_64
+
 AS ?= as
 LD ?= ld
 
@@ -24,6 +27,17 @@ calculator: calc_ui.o calc_core.o
 	$(LD) calc_ui.o calc_core.o -o calculator
 	strip -s -R .comment -R .note calculator
 
+# Package standalone binary and release assets
+release: calculator
+	mkdir -p dist
+	cp calculator dist/assembly-calculator
+	tar -czvf dist/$(PKG_NAME).tar.gz -C dist assembly-calculator
+	cd dist && sha256sum $(PKG_NAME).tar.gz assembly-calculator > SHA256SUMS.txt
+	@echo "======================================================================"
+	@echo "Release bundle created successfully in dist/:"
+	@ls -lh dist/
+	@echo "======================================================================"
+
 # Test headless rendering (generates sample frame dumps in Netpbm PPM format)
 dump: calculator
 	./calculator --dump preview_basic.ppm 0
@@ -34,6 +48,6 @@ dump: calculator
 
 # Remove build artifacts and temporary previews
 clean:
-	rm -f *.o calculator preview_*.ppm preview_*.png
+	rm -rf *.o calculator preview_*.ppm preview_*.png dist
 
-.PHONY: all dump clean
+.PHONY: all dump clean release

@@ -1,15 +1,50 @@
-# Libadwaita Complex Calculator (Pure x86_64 Assembly)
+# Assembly-Calculator (v1.0.0)
 
-A modern, standalone desktop calculator built **100% in pure x86_64 Linux assembly**, adhering to GNOME's **Libadwaita** design language.
+[![Release](https://img.shields.io/github/v/release/DuttaAB-dev/Assembly-Calculator?color=3584E4&label=version)](https://github.com/DuttaAB-dev/Assembly-Calculator/releases/latest)
+[![Binary Size](https://img.shields.io/badge/binary%20size-74%20KB-success)](https://github.com/DuttaAB-dev/Assembly-Calculator/releases/latest)
+[![Pure Assembly](https://img.shields.io/badge/language-x86__64%20assembly-orange)](#)
+[![Zero Dependencies](https://img.shields.io/badge/dependencies-none%20(libc--free)-blue)](#)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-> **Zero C, Zero External Libraries, Zero Toolkits**:
-> This application does **not** link against libc, Xlib, XCB, Cairo, GTK, or any runtime helper. It interacts directly with the Linux kernel via syscalls and speaks the raw binary X11 wire protocol over a UNIX domain socket.
+A modern, standalone desktop calculator built **100% in pure x86_64 Linux assembly** from scratch.
+
+It features **zero external dependencies** — no C runtime (`libc`), no GTK, no Qt, and no Xlib. It speaks raw X11 binary wire protocol over a UNIX domain socket directly to the X server, and implements an in-house software 2D graphics engine with **$2\times 2$ subpixel supersampling (SSAA)**, fixed-point alpha blending, and fractional anti-aliased typography.
 
 ---
 
-## Features
+## Releases & Pre-Built Binaries
 
-- **Libadwaita Dark Design System**:
+Pre-compiled, statically linked standalone binaries (74 KB ELF) with zero dependencies are available on the [**Releases Page**](https://github.com/DuttaAB-dev/Assembly-Calculator/releases):
+
+### Download & Run v1.0.0
+```bash
+# Download the compressed release archive
+wget https://github.com/DuttaAB-dev/Assembly-Calculator/releases/download/v1.0.0/assembly-calculator-v1.0.0-linux-x86_64.tar.gz
+
+# Extract the archive
+tar -xzf assembly-calculator-v1.0.0-linux-x86_64.tar.gz
+
+# Run directly on any x86_64 Linux system
+./assembly-calculator
+```
+
+Or download the standalone executable directly:
+```bash
+wget https://github.com/DuttaAB-dev/Assembly-Calculator/releases/download/v1.0.0/assembly-calculator
+chmod +x assembly-calculator
+./assembly-calculator
+```
+
+---
+
+## Key Features
+
+- **Pure x86_64 Linux Assembly**:
+  - Zero external libraries: zero C runtime (`libc`), no Xlib/XCB, no OpenGL, no Cairo.
+  - Direct Linux kernel system calls (`sys_mmap`, `sys_socket`, `sys_connect`, `sys_poll`, `sys_read`, `sys_write`, `sys_exit`).
+  - Hand-crafted binary X11 protocol engine: connection setup, atom interning, CSD configuration, shaped windows, and pixmap blitting.
+
+- **Modern Libadwaita Dark Theme & Visual Design**:
   - Exact Adwaita color palette (window background `#242424`, display card `#1E1E1E`, buttons `#323232`, accent blue `#3584E4`, destructive red `#E01B24`).
   - Client-Side Decorations (CSD): Custom headerbar with title, hamburger menu, history clock button, and close button, with window decorations suppressed via `_MOTIF_WM_HINTS`.
   - Window Dragging: Native interactive window movement via EWMH `_NET_WM_MOVERESIZE`.
@@ -29,8 +64,10 @@ A modern, standalone desktop calculator built **100% in pure x86_64 Linux assemb
   - **Scientific Mode**: 5x6 keypad layout with degree/radian trigonometric functions ($\sin$, $\cos$, $\tan$), constants ($\pi$, $e$), powers ($x^2$, $\sqrt{x}$, $1/x$), and logarithms ($\ln$, $\log_{10}$), all with automated history recording.
   - **Programmer Mode**: 5x6 keypad layout with 64-bit integer signed arithmetic, bitwise logic (`&`, `|`, `^`, `~`, `<<`, `>>`), hexadecimal entry (`A`–`F`), and a live synchronized 4-base inspector displaying **HEX**, **DEC**, **OCT**, and **BIN** representations.
 
-- **Headless CI & Testing**:
-  - Command-line flag `--dump <output.ppm> [mode] [menu/history]` renders full frames to Netpbm PPM image files without needing a running X server or display connection.
+- **Command-Line Interface**:
+  - `-v`, `--version`: Prints version metadata (`Assembly-Calculator v1.0.0`).
+  - `-h`, `--help`: Prints comprehensive command-line options and usage syntax.
+  - `--dump <file.ppm> [mode] [m|h]`: Headless CI rendering engine that renders pixel-accurate Netpbm PPM frames without requiring an X server or display connection.
 
 ---
 
@@ -38,11 +75,14 @@ A modern, standalone desktop calculator built **100% in pure x86_64 Linux assemb
 
 ```
 Assembly-Calculator/
-├── calc_ui.s      # UI Subsystem, Direct X11 Socket Driver & Software Rasterizer
-├── calc_core.s    # Arithmetic Engine, x87 FPU Math, Radix Formatters & Keypad Dispatch
-├── font.bin       # Embedded 105-glyph 16x32 antialiased typography font (8-bit coverage, includes Clock icon)
-├── Makefile       # Standalone build automation (as + ld + strip)
-└── README.md      # Comprehensive architecture and technical documentation
+├── calc_ui.s              # UI Subsystem, Direct X11 Socket Driver & Software Rasterizer
+├── calc_core.s            # Arithmetic Engine, x87 FPU Math, Radix Formatters & Keypad Dispatch
+├── font.bin               # Embedded 105-glyph 16x32 antialiased typography font (8-bit coverage)
+├── Makefile               # Standalone build automation (as + ld + strip + release packaging)
+├── .github/
+│   └── workflows/
+│       └── release.yml    # Automated CI/CD release builder and asset publisher
+└── README.md              # Comprehensive architecture and technical documentation
 ```
 
 ### 1. `calc_ui.s` (UI & X11 Driver)
@@ -88,25 +128,24 @@ Assembly-Calculator/
 
 ---
 
-## Building and Running
+## Building from Source
 
 ### Prerequisites
 - Linux x86_64
 - GNU Assembler (`as`) and GNU Linker (`ld`) (available via `binutils` on all Linux distributions)
 - An active X11 or Xwayland display server (for GUI mode)
 
-### Build
-Compile, link, and strip the binary:
+### Build Executable
 ```bash
 make clean && make
 ```
 The resulting executable is a standalone, statically linked ELF binary (`calculator`) with zero runtime dependencies.
 
-### Run
-Launch the calculator GUI:
+### Package Release Archive
 ```bash
-./calculator
+make release
 ```
+Creates `dist/assembly-calculator`, `dist/assembly-calculator-v1.0.0-linux-x86_64.tar.gz`, and `dist/SHA256SUMS.txt`.
 
 ### Headless Verification (Frame Dump)
 To render and verify the UI headlessly without an X server:
@@ -114,8 +153,7 @@ To render and verify the UI headlessly without an X server:
 # Dump all modes, menu, and history to PPM image files
 make dump
 
-# Or specify custom modes directly:
-# ./calculator --dump <filename.ppm> [mode: 0=Basic, 1=Scientific, 2=Programmer] [popover: 'm'=menu, 'h'=history]
+# Custom dumps:
 ./calculator --dump preview_basic.ppm 0
 ./calculator --dump preview_adv.ppm 1
 ./calculator --dump preview_prog.ppm 2
@@ -135,6 +173,21 @@ make dump
 | `Enter` / `Numpad Enter` | Evaluate expression (`=`) |
 | `BackSpace` | Delete last entered character |
 | `Escape` / `c` | Clear active display input (`C`) |
+
+---
+
+## Release History
+
+### v1.0.0 (Initial Release)
+- **Zero-Dependency x86_64 Assembly Engine**: Full standalone calculator implemented in pure Linux assembly.
+- **Tri-Mode Support**: Basic, Scientific, and Programmer modes with interactive base conversions.
+- **Libadwaita Dark Theme CSD**: Custom HeaderBar, hamburger menu popover, and interactive window dragging.
+- **X11 Shaped Window**: Physical rounded corners via X11 Shape extension.
+- **2x2 Subpixel Supersampling (SSAA)**: Smooth antialiased squircles and buttons with fixed-point alpha blending.
+- **Anti-Aliased Typography**: Native $16\times 32$ 8-bit coverage font with $2\times 2$ box subsampling.
+- **Calculation History Journal**: Multi-entry calculation memory and dedicated History Popover with click recall.
+- **Headless CI Testing**: Netpbm PPM frame dump engine (`--dump`).
+- **CLI Options**: `-v`/`--version` and `-h`/`--help`.
 
 ---
 

@@ -108,6 +108,23 @@
 font_data:
     .incbin "font.bin"
 
+# 1b. CLI Information Strings
+str_version:
+    .ascii "Assembly-Calculator v1.0.0 (x86_64-linux, pure assembly, direct X11)\n"
+    .equ STR_VERSION_LEN, . - str_version
+
+str_help:
+    .ascii "Assembly-Calculator v1.0.0 - Standalone x86_64 Linux Desktop Calculator\n"
+    .ascii "Usage: calculator [OPTIONS]\n\n"
+    .ascii "Options:\n"
+    .ascii "  -v, --version               Print version information and exit\n"
+    .ascii "  -h, --help                  Print this help message and exit\n"
+    .ascii "  --dump <file.ppm> [mode] [m|h]\n"
+    .ascii "                              Render headless frame dump in Netpbm PPM format\n"
+    .ascii "                              mode: 0=Basic, 1=Scientific, 2=Programmer\n"
+    .ascii "                              m: open menu popover, h: open history popover\n"
+    .equ STR_HELP_LEN, . - str_help
+
 # 2. X11 Wire Protocol String Literals
 str_x0_path:      .asciz "/tmp/.X11-unix/X0"            # UNIX domain socket path
 str_auth_name:    .asciz "MIT-MAGIC-COOKIE-1"           # X11 authorization protocol
@@ -297,6 +314,81 @@ sock_addr:      .skip 128                # struct sockaddr_un for /tmp/.X11-unix
 _start:
     mov %rsp, initial_rsp(%rip)          # Save initial stack pointer
 
+    # Check for CLI information flags (--version, -v, --help, -h)
+    mov (%rsp), %rax                     # %rax = argc
+    cmp $2, %rax
+    jl .alloc_fb
+
+    mov 16(%rsp), %rsi                   # %rsi = argv[1]
+    cmpb $'-', (%rsi)
+    jne .alloc_fb
+
+    # Check for -v
+    cmpb $'v', 1(%rsi)
+    jne .chk_long_v
+    cmpb $0, 2(%rsi)
+    je .print_version
+
+.chk_long_v:
+    cmpb $'-', 1(%rsi)
+    jne .chk_h
+    cmpb $'v', 2(%rsi)
+    jne .chk_long_h
+    cmpb $'e', 3(%rsi)
+    jne .chk_long_h
+    cmpb $'r', 4(%rsi)
+    jne .chk_long_h
+    cmpb $'s', 5(%rsi)
+    jne .chk_long_h
+    cmpb $'i', 6(%rsi)
+    jne .chk_long_h
+    cmpb $'o', 7(%rsi)
+    jne .chk_long_h
+    cmpb $'n', 8(%rsi)
+    jne .chk_long_h
+    cmpb $0, 9(%rsi)
+    je .print_version
+
+.chk_h:
+    cmpb $'h', 1(%rsi)
+    jne .alloc_fb
+    cmpb $0, 2(%rsi)
+    je .print_help
+
+.chk_long_h:
+    cmpb $'h', 2(%rsi)
+    jne .alloc_fb
+    cmpb $'e', 3(%rsi)
+    jne .alloc_fb
+    cmpb $'l', 4(%rsi)
+    jne .alloc_fb
+    cmpb $'p', 5(%rsi)
+    jne .alloc_fb
+    cmpb $0, 6(%rsi)
+    je .print_help
+    jmp .alloc_fb
+
+.print_version:
+    mov $SYS_WRITE, %rax
+    mov $1, %rdi
+    lea str_version(%rip), %rsi
+    mov $STR_VERSION_LEN, %rdx
+    syscall
+    mov $SYS_EXIT, %rax
+    xor %rdi, %rdi
+    syscall
+
+.print_help:
+    mov $SYS_WRITE, %rax
+    mov $1, %rdi
+    lea str_help(%rip), %rsi
+    mov $STR_HELP_LEN, %rdx
+    syscall
+    mov $SYS_EXIT, %rax
+    xor %rdi, %rdi
+    syscall
+
+.alloc_fb:
     # 1. Allocate Framebuffer via sys_mmap (420x680x4 bytes = 1,142,400 bytes)
     # Arguments: addr=0, len=FB_SIZE, prot=PROT_READ|PROT_WRITE(3),
     #            flags=MAP_PRIVATE|MAP_ANONYMOUS(0x22), fd=-1, offset=0

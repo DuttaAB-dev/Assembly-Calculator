@@ -1,0 +1,39 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-and-release:
+    name: Build & Publish Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Install Build Prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y binutils make tar gzip
+
+      - name: Build Standalone Binary & Package Release
+        run: |
+          make release
+
+      - name: Create GitHub Release & Upload Assets
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "Release ${{ github.ref_name }}"
+          tag_name: ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+          files: |
+            dist/assembly-calculator
+            dist/assembly-calculator-${{ github.ref_name }}-linux-x86_64.tar.gz
+            dist/SHA256SUMS.txt
+          generate_release_notes: true
