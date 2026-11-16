@@ -1252,25 +1252,45 @@ x11_set_window_shape:
     movzbq 9(%rsp), %r10                 # Read major_opcode at offset 9
 
     # ShapeRectangles Header (Minor Opcode 1, Length 70 words = 280 bytes)
+    # Wire layout:
+    #   Offset 0:     CARD8 major-opcode (SHAPE)
+    #   Offset 1:     CARD8 minor-opcode (1 = ShapeRectangles)
+    #   Offset 2-3:   CARD16 length (70 words = 280 bytes)
+    #   Offset 4:     CARD8 op (0 = ShapeSet)
+    #   Offset 5:     CARD8 dest-kind (0 = ShapeBounding, 1 = ShapeClip)
+    #   Offset 6:     CARD8 ordering (0 = Unsorted)
+    #   Offset 7:     CARD8 pad (0)
+    #   Offset 8-11:  CARD32 dest-window (win_id)
+    #   Offset 12-13: INT16 x-offset (0)
+    #   Offset 14-15: INT16 y-offset (0)
+    #   Offset 16+:   List of 33 RECTANGLEs (66 dwords = 264 bytes)
     movb %r10b, (%rsp)                   # Major opcode
     movb $1, 1(%rsp)                     # Minor opcode 1 (ShapeRectangles)
     movw $70, 2(%rsp)                    # Length in 4-byte words
+    movb $0, 4(%rsp)                     # op = ShapeSet (0)
+    movb $0, 5(%rsp)                     # dest_kind = ShapeBounding (0)
+    movb $0, 6(%rsp)                     # ordering = Unsorted (0)
+    movb $0, 7(%rsp)                     # pad = 0
     mov win_id(%rip), %eax
-    mov %eax, 4(%rsp)                    # Destination window ID
-    movb $0, 8(%rsp)                     # dest_kind = ShapeBounding (0)
-    movb $0, 9(%rsp)                     # op = ShapeSet (0)
-    movb $0, 10(%rsp)                    # ordering = Unsorted (0)
-    movb $0, 11(%rsp)                    # Pad
+    mov %eax, 8(%rsp)                    # Destination window ID (offset 8)
     movw $0, 12(%rsp)                    # x_offset = 0
     movw $0, 14(%rsp)                    # y_offset = 0
 
-    # Copy 33 rectangles (66 dwords) from shape_rects_table into request body
+    # Copy 33 rectangles (66 dwords) from shape_rects_table into request body (offset 16)
     lea 16(%rsp), %rdi
     lea shape_rects_table(%rip), %rsi
     mov $66, %ecx
     rep movsl
 
-    # Send ShapeRectangles request
+    # Send ShapeRectangles request for ShapeBounding (dest_kind = 0)
+    mov $SYS_WRITE, %rax
+    mov sock_fd(%rip), %rdi
+    mov %rsp, %rsi
+    mov $280, %rdx
+    syscall
+
+    # Also apply ShapeClip (dest_kind = 1) so client clipping matches bounding
+    movb $1, 5(%rsp)                     # dest_kind = ShapeClip (1)
     mov $SYS_WRITE, %rax
     mov sock_fd(%rip), %rdi
     mov %rsp, %rsi
