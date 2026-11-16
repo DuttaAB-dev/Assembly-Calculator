@@ -162,18 +162,18 @@ str_hist_clear:  .asciz "Clear All History"
 # 6. Keypad Grid Layout Tables (ASCII or custom glyph bytes)
 # Glyph IDs: 127 = ≡, 128 = π, 129 = √, 130 = ⌫, 131 = ÷, 132 = ×, 133 = ±
 basic_key_labels:
-    .byte 'C', 130, 133, 131
+    .byte 'C', 130, '%', 131
     .byte '7', '8', '9', 132
     .byte '4', '5', '6', '-'
     .byte '1', '2', '3', '+'
-    .byte '(', '0', '.', '='
+    .byte 133, '0', '.', '='
 
 adv_key_types:
-    .byte 's', 'C', 130, 133, 131
+    .byte 's', 'C', 130, '%', 131
     .byte 'c', '7', '8', '9', 132
     .byte 't', '4', '5', '6', '-'
     .byte 129, '1', '2', '3', '+'
-    .byte 128, '(', '0', '.', '='
+    .byte 128, 133, '0', '.', '='
     .byte 'e', 'l', 'g', '^', 'r'
 
 # 7. Physical Window Rounded Corners Clipping Rectangles Table (33 entries)
@@ -181,39 +181,39 @@ adv_key_types:
 # Format per entry: x (short), y (short), width (short), height (short)
 .align 8
 shape_rects_table:
-    .short 10, 0, 400, 1
-    .short 8, 1, 404, 1
-    .short 6, 2, 408, 1
-    .short 5, 3, 410, 1
-    .short 4, 4, 412, 1
-    .short 3, 5, 414, 1
-    .short 2, 6, 416, 1
-    .short 2, 7, 416, 1
-    .short 1, 8, 418, 1
-    .short 1, 9, 418, 1
-    .short 0, 10, 420, 1
-    .short 0, 11, 420, 1
-    .short 0, 12, 420, 1
-    .short 0, 13, 420, 1
-    .short 0, 14, 420, 1
-    .short 0, 15, 420, 1
-    .short 0, 16, 420, 648
-    .short 0, 664, 420, 1
-    .short 0, 665, 420, 1
-    .short 0, 666, 420, 1
-    .short 0, 667, 420, 1
-    .short 0, 668, 420, 1
-    .short 0, 669, 420, 1
-    .short 1, 670, 418, 1
-    .short 1, 671, 418, 1
-    .short 2, 672, 416, 1
-    .short 2, 673, 416, 1
-    .short 3, 674, 414, 1
-    .short 4, 675, 412, 1
-    .short 5, 676, 410, 1
-    .short 6, 677, 408, 1
-    .short 8, 678, 404, 1
-    .short 10, 679, 400, 1
+    .short 11, 0, 398, 1
+    .short  9, 1, 402, 1
+    .short  7, 2, 406, 1
+    .short  6, 3, 408, 1
+    .short  5, 4, 410, 1
+    .short  4, 5, 412, 1
+    .short  3, 6, 414, 1
+    .short  3, 7, 414, 1
+    .short  2, 8, 416, 1
+    .short  2, 9, 416, 1
+    .short  1, 10, 418, 1
+    .short  1, 11, 418, 1
+    .short  1, 12, 418, 1
+    .short  1, 13, 418, 1
+    .short  1, 14, 418, 1
+    .short  0, 15, 420, 1
+    .short  0, 16, 420, 648
+    .short  0, 664, 420, 1
+    .short  1, 665, 418, 1
+    .short  1, 666, 418, 1
+    .short  1, 667, 418, 1
+    .short  1, 668, 418, 1
+    .short  1, 669, 418, 1
+    .short  2, 670, 416, 1
+    .short  2, 671, 416, 1
+    .short  3, 672, 414, 1
+    .short  3, 673, 414, 1
+    .short  4, 674, 412, 1
+    .short  5, 675, 410, 1
+    .short  6, 676, 408, 1
+    .short  7, 677, 406, 1
+    .short  9, 678, 402, 1
+    .short 11, 679, 398, 1
 
 prog_key_types:
     .byte '&', '|', '^', '~', 'C'
@@ -2070,13 +2070,13 @@ render_ui:
     push %rbp
     mov %rsp, %rbp
 
-    # 1. Clear outer canvas to 0 (transparent outside rounded window boundary)
+    # 1. Fill entire canvas with window background color (#242424)
     mov fb_ptr(%rip), %rdi
-    xor %eax, %eax
+    mov $COL_BG, %eax
     mov $WIN_W * WIN_H, %ecx
     rep stosl
 
-    # 2. Window background card with 18px rounded corners
+    # 2. Window background card with 16px rounded corners (matches X11 Shape)
     mov $0, %edi
     mov $0, %esi
     mov $WIN_W, %edx
@@ -2084,7 +2084,7 @@ render_ui:
     mov $COL_BG, %r8d
     mov $0x383838, %r9d                  # Subtle outer border
     sub $8, %rsp
-    movq $18, (%rsp)                     # Radius 18px
+    movq $16, (%rsp)                     # Radius 16px (matches shape mask)
     call draw_squircle
     add $8, %rsp
 
