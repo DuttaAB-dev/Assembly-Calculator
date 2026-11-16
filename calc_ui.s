@@ -95,6 +95,43 @@ adv_key_types:
     .byte 128, '(', '0', '.', '='
     .byte 'e', 'l', 'g', '^', 'r'
 
+
+.align 8
+shape_rects_table:
+    .short 10, 0, 400, 1
+    .short 8, 1, 404, 1
+    .short 6, 2, 408, 1
+    .short 5, 3, 410, 1
+    .short 4, 4, 412, 1
+    .short 3, 5, 414, 1
+    .short 2, 6, 416, 1
+    .short 2, 7, 416, 1
+    .short 1, 8, 418, 1
+    .short 1, 9, 418, 1
+    .short 0, 10, 420, 1
+    .short 0, 11, 420, 1
+    .short 0, 12, 420, 1
+    .short 0, 13, 420, 1
+    .short 0, 14, 420, 1
+    .short 0, 15, 420, 1
+    .short 0, 16, 420, 648
+    .short 0, 664, 420, 1
+    .short 0, 665, 420, 1
+    .short 0, 666, 420, 1
+    .short 0, 667, 420, 1
+    .short 0, 668, 420, 1
+    .short 0, 669, 420, 1
+    .short 1, 670, 418, 1
+    .short 1, 671, 418, 1
+    .short 2, 672, 416, 1
+    .short 2, 673, 416, 1
+    .short 3, 674, 414, 1
+    .short 4, 675, 412, 1
+    .short 5, 676, 410, 1
+    .short 6, 677, 408, 1
+    .short 8, 678, 404, 1
+    .short 10, 679, 400, 1
+
 prog_key_types:
     .byte '&', '|', '^', '~', 'C'
     .byte '<', '>', 'A', 'B', 130
@@ -802,6 +839,7 @@ x11_init_window:
     mov $44, %rdx
     syscall
 .skip_mwm:
+    call x11_set_window_shape
 
     # 6. MapWindow
     movl $0x00020008, (%rsp)
@@ -814,6 +852,63 @@ x11_init_window:
     mov $8, %rdx
     syscall
 
+    leave
+    ret
+
+
+x11_set_window_shape:
+    push %rbp
+    mov %rsp, %rbp
+    sub $320, %rsp
+
+    # QueryExtension "SHAPE"
+    movl $0x00040062, (%rsp)
+    movw $5, 4(%rsp)
+    movw $0, 6(%rsp)
+    movl $0x50414853, 8(%rsp)
+    movl $0x00000045, 12(%rsp)
+
+    mov $SYS_WRITE, %rax
+    mov sock_fd(%rip), %rdi
+    mov %rsp, %rsi
+    mov $16, %rdx
+    syscall
+
+    mov $SYS_READ, %rax
+    mov sock_fd(%rip), %rdi
+    mov %rsp, %rsi
+    mov $32, %rdx
+    syscall
+
+    cmpb $1, 8(%rsp)
+    jne .shape_done
+    movzbq 9(%rsp), %r10
+
+    # ShapeRectangles header
+    movb %r10b, (%rsp)
+    movb $1, 1(%rsp)
+    movw $70, 2(%rsp)
+    mov win_id(%rip), %eax
+    mov %eax, 4(%rsp)
+    movb $0, 8(%rsp)
+    movb $0, 9(%rsp)
+    movb $0, 10(%rsp)
+    movb $0, 11(%rsp)
+    movw $0, 12(%rsp)
+    movw $0, 14(%rsp)
+
+    lea 16(%rsp), %rdi
+    lea shape_rects_table(%rip), %rsi
+    mov $66, %ecx
+    rep movsl
+
+    mov $SYS_WRITE, %rax
+    mov sock_fd(%rip), %rdi
+    mov %rsp, %rsi
+    mov $280, %rdx
+    syscall
+
+.shape_done:
     leave
     ret
 
@@ -951,45 +1046,181 @@ draw_rect:
 draw_squircle:
     push %rbp
     mov %rsp, %rbp
-    push %r12
-    push %r13
-    push %r14
-    push %r15
-    push %rbx
+    sub $96, %rsp
+    mov %r12, -8(%rbp)
+    mov %r13, -16(%rbp)
+    mov %r14, -24(%rbp)
+    mov %r15, -32(%rbp)
+    mov %rbx, -40(%rbp)
 
-    mov %edi, %r12d
-    mov %esi, %r13d
-    mov %edx, %r14d
-    mov %ecx, %r15d
-    mov 16(%rbp), %ebx
+    mov %edi, %r12d        # x
+    mov %esi, %r13d        # y
+    mov %edx, %r14d        # w
+    mov %ecx, %r15d        # h
+    mov 16(%rbp), %ebx     # r
+
+    mov %r8d, -48(%rbp)    # fill color
+    mov %r9d, -56(%rbp)    # border color
+
+    test %r14d, %r14d
+    jle .sq_done
+    test %r15d, %r15d
+    jle .sq_done
 
     test %ebx, %ebx
-    jle .sq_rect
+    jle .sq_fallback
 
+    # Clamp r to min(w/2, h/2)
+    mov %r14d, %eax
+    shr $1, %eax
+    cmp %eax, %ebx
+    cmovg %eax, %ebx
+    mov %r15d, %eax
+    shr $1, %eax
+    cmp %eax, %ebx
+    cmovg %eax, %ebx
+
+    # r_sq = r * r
+    mov %ebx, %eax
+    imul %ebx, %eax
+    mov %eax, -64(%rbp)
+
+    # r_in_sq = (r - 1) * (r - 1)
+    lea -1(%ebx), %eax
+    imul %eax, %eax
+    mov %eax, -72(%rbp)
+
+    xor %r11d, %r11d       # py = 0
+.sq_row_loop:
+    cmp %r15d, %r11d
+    jge .sq_done
+
+    mov %r13d, %eax
+    add %r11d, %eax        # screen_y = y + py
+    cmp $WIN_H, %eax
+    jge .sq_row_next
+    test %eax, %eax
+    jl .sq_row_next
+
+    # cy calculation
+    xor %esi, %esi
+    cmp %ebx, %r11d
+    jge .sq_chk_by
+    mov %ebx, %esi
+    sub $1, %esi
+    sub %r11d, %esi        # cy = r - 1 - py
+    jmp .sq_got_cy
+.sq_chk_by:
+    mov %r15d, %edx
+    sub %ebx, %edx        # h - r
+    cmp %edx, %r11d
+    jl .sq_got_cy
+    mov %r11d, %esi
+    sub %edx, %esi        # cy = py - (h - r)
+.sq_got_cy:
+    mov %esi, -80(%rbp)    # save cy
+
+    imul $WIN_W, %eax
+    add %r12d, %eax
+    shl $2, %rax
+    add fb_ptr(%rip), %rax
+    mov %rax, %rcx         # rcx = current pixel pointer
+
+    xor %r10d, %r10d       # px = 0
+.sq_col_loop:
+    cmp %r14d, %r10d
+    jge .sq_row_next
+
+    mov %r12d, %eax
+    add %r10d, %eax        # screen_x = x + px
+    cmp $WIN_W, %eax
+    jge .sq_col_skip
+    test %eax, %eax
+    jl .sq_col_skip
+
+    # cx calculation
+    xor %edi, %edi
+    cmp %ebx, %r10d
+    jge .sq_chk_rx
+    mov %ebx, %edi
+    sub $1, %edi
+    sub %r10d, %edi        # cx = r - 1 - px
+    jmp .sq_eval_pixel
+.sq_chk_rx:
+    mov %r14d, %edx
+    sub %ebx, %edx        # w - r
+    cmp %edx, %r10d
+    jl .sq_eval_pixel
+    mov %r10d, %edi
+    sub %edx, %edi        # cx = px - (w - r)
+
+.sq_eval_pixel:
+    mov -80(%rbp), %esi    # restore cy
+    test %edi, %edi
+    jz .sq_straight
+    test %esi, %esi
+    jz .sq_straight
+
+    mov %edi, %eax
+    imul %edi, %eax       # cx^2
+    mov %esi, %edx
+    imul %esi, %edx       # cy^2
+    add %edx, %eax        # d2 = cx^2 + cy^2
+
+    cmp -64(%rbp), %eax   # d2 > r_sq ?
+    jg .sq_col_skip
+
+    cmp -72(%rbp), %eax   # d2 >= r_in_sq ?
+    jge .sq_write_border
+    jmp .sq_write_fill
+
+.sq_straight:
+    test %r10d, %r10d
+    jz .sq_write_border
+    mov %r14d, %eax
+    dec %eax
+    cmp %eax, %r10d
+    je .sq_write_border
+
+    test %r11d, %r11d
+    jz .sq_write_border
+    mov %r15d, %eax
+    dec %eax
+    cmp %eax, %r11d
+    je .sq_write_border
+
+.sq_write_fill:
+    mov -48(%rbp), %eax
+    mov %eax, (%rcx)
+    jmp .sq_col_skip
+
+.sq_write_border:
+    mov -56(%rbp), %eax
+    mov %eax, (%rcx)
+
+.sq_col_skip:
+    add $4, %rcx
+    inc %r10d
+    jmp .sq_col_loop
+
+.sq_row_next:
+    inc %r11d
+    jmp .sq_row_loop
+
+.sq_fallback:
     mov %r12d, %edi
     mov %r13d, %esi
     mov %r14d, %edx
     mov %r15d, %ecx
-    push %r8
-    mov %r9d, %r8d
+    mov -48(%rbp), %r8d
     call draw_rect
-    pop %r8
 
-    lea 1(%r12d), %edi
-    lea 1(%r13d), %esi
-    lea -2(%r14d), %edx
-    lea -2(%r15d), %ecx
-    call draw_rect
-    jmp .sq_done
-
-.sq_rect:
-    call draw_rect
 .sq_done:
-    pop %rbx
-    pop %r15
-    pop %r14
-    pop %r13
-    pop %r12
+    mov -8(%rbp), %r12
+    mov -16(%rbp), %r13
+    mov -24(%rbp), %r14
+    mov -32(%rbp), %r15
+    mov -40(%rbp), %rbx
     leave
     ret
 
@@ -997,88 +1228,110 @@ draw_squircle:
 draw_glyph:
     push %rbp
     mov %rsp, %rbp
-    push %r12
-    push %r13
-    push %r14
-    push %r15
-    push %rbx
+    sub $80, %rsp
+    mov %r12, -8(%rbp)
+    mov %r13, -16(%rbp)
+    mov %r14, -24(%rbp)
+    mov %r15, -32(%rbp)
+    mov %rbx, -40(%rbp)
 
-    mov %edi, %r12d
-    mov %esi, %r13d
+    mov %edi, %r12d        # x
+    mov %esi, %r13d        # y
+    mov %r8d, -48(%rbp)    # color
+    mov %r9d, -56(%rbp)    # scale
+
     sub $32, %edx
     cmp $105, %edx
-    jge .dg_done
+    jge .dg_ret
     test %edx, %edx
-    jl .dg_done
+    jl .dg_ret
 
     shl $4, %rdx
     lea font_data(%rip), %rax
     add %rdx, %rax
-    mov %rax, %r14
+    mov %rax, %r14         # glyph font data pointer
 
-    xor %r15d, %r15d
-.row_loop:
+    xor %r15d, %r15d       # row = 0 to 15
+.dg_row_loop:
     cmp $16, %r15d
-    jge .dg_done
+    jge .dg_ret
     movzbq (%r14, %r15), %rbx
 
-    xor %ecx, %ecx
-.col_loop:
+    xor %ecx, %ecx         # col = 0 to 7
+.dg_col_loop:
     cmp $8, %ecx
-    jge .row_next
-    mov $7, %rdx
-    sub %rcx, %rdx
+    jge .dg_row_next
+    mov $7, %edx
+    sub %ecx, %edx
     bt %rdx, %rbx
-    jnc .col_next
+    jnc .dg_col_next
 
-    cmp $1, %r9d
-    jg .scale2
-
-    # Scale 1x
-    mov %r13d, %eax
-    add %r15d, %eax
-    cmp $WIN_H, %eax
-    jge .col_next
-    imul $WIN_W, %eax
+    # Active bit!
+    mov -56(%rbp), %eax
+    imul %ecx, %eax
     add %r12d, %eax
-    add %ecx, %eax
-    cmp $WIN_W * WIN_H, %eax
-    jge .col_next
-    shl $2, %rax
-    add fb_ptr(%rip), %rax
-    mov %r8d, (%rax)
-    jmp .col_next
+    mov %eax, -64(%rbp)    # base_x
 
-.scale2:
-    # Scale 2x
-    mov %r13d, %eax
-    lea (%rax, %r15, 2), %eax
-    mov %r12d, %edx
-    lea (%rdx, %rcx, 2), %edx
+    mov -56(%rbp), %eax
+    imul %r15d, %eax
+    add %r13d, %eax
+    mov %eax, -72(%rbp)    # base_y
+
+    xor %edx, %edx         # sy = 0 to scale - 1
+.dg_sy_loop:
+    cmp -56(%rbp), %edx
+    jge .dg_col_next
+
+    mov -72(%rbp), %eax
+    add %edx, %eax         # py = base_y + sy
+    cmp $WIN_H, %eax
+    jge .dg_sy_next
+    test %eax, %eax
+    jl .dg_sy_next
 
     imul $WIN_W, %eax
-    add %edx, %eax
+    mov %eax, %esi
+
+    xor %edi, %edi         # sx = 0 to scale - 1
+.dg_sx_loop:
+    cmp -56(%rbp), %edi
+    jge .dg_sy_next
+
+    mov -64(%rbp), %eax
+    add %edi, %eax         # px = base_x + sx
+    cmp $WIN_W, %eax
+    jge .dg_sx_next
+    test %eax, %eax
+    jl .dg_sx_next
+
+    add %esi, %eax
     shl $2, %rax
     add fb_ptr(%rip), %rax
+    mov -48(%rbp), %r8d
     mov %r8d, (%rax)
-    mov %r8d, 4(%rax)
-    mov %r8d, WIN_W * 4(%rax)
-    mov %r8d, (WIN_W * 4 + 4)(%rax)
 
-.col_next:
+.dg_sx_next:
+    inc %edi
+    jmp .dg_sx_loop
+
+.dg_sy_next:
+    inc %edx
+    jmp .dg_sy_loop
+
+.dg_col_next:
     inc %ecx
-    jmp .col_loop
+    jmp .dg_col_loop
 
-.row_next:
+.dg_row_next:
     inc %r15d
-    jmp .row_loop
+    jmp .dg_row_loop
 
-.dg_done:
-    pop %rbx
-    pop %r15
-    pop %r14
-    pop %r13
-    pop %r12
+.dg_ret:
+    mov -8(%rbp), %r12
+    mov -16(%rbp), %r13
+    mov -24(%rbp), %r14
+    mov -32(%rbp), %r15
+    mov -40(%rbp), %rbx
     leave
     ret
 
@@ -1131,11 +1384,23 @@ render_ui:
     push %rbp
     mov %rsp, %rbp
 
-    # 1. Clear background to #242424
+    # 1. Clear outer canvas to 0 (corners transparent)
     mov fb_ptr(%rip), %rdi
-    mov $COL_BG, %eax
+    xor %eax, %eax
     mov $WIN_W * WIN_H, %ecx
     rep stosl
+
+    # 2. Window background card with 18px rounded corners
+    mov $0, %edi
+    mov $0, %esi
+    mov $WIN_W, %edx
+    mov $WIN_H, %ecx
+    mov $COL_BG, %r8d
+    mov $0x383838, %r9d
+    sub $8, %rsp
+    movq $18, (%rsp)
+    call draw_squircle
+    add $8, %rsp
 
     # 2. HeaderBar Separator Line at y=50
     mov $0, %edi
@@ -1153,7 +1418,7 @@ render_ui:
     mov $COL_BTN_IDLE, %r8d
     mov $COL_BTN_BORDER, %r9d
     sub $8, %rsp
-    movq $8, (%rsp)
+    movq $10, (%rsp)
     call draw_squircle
     add $8, %rsp
 
@@ -1211,7 +1476,7 @@ render_ui:
     mov $COL_CARD_BG, %r8d
     mov $COL_CARD_BORDER, %r9d
     sub $8, %rsp
-    movq $12, (%rsp)
+    movq $14, (%rsp)
     call draw_squircle
     add $8, %rsp
 
@@ -1411,7 +1676,7 @@ render_basic_keys:
     push %rdi
     push %rsi
     sub $8, %rsp
-    movq $10, (%rsp)
+    movq $14, (%rsp)
     call draw_squircle
     add $8, %rsp
     pop %rsi
@@ -1419,10 +1684,10 @@ render_basic_keys:
 
     lea basic_key_labels(%rip), %rax
     movzbq (%rax, %r12), %rdx
-    lea 38(%rdi), %edi
-    lea 32(%rsi), %esi
+    lea 36(%rdi), %edi
+    lea 24(%rsi), %esi
     mov $COL_TEXT_PRI, %r8d
-    mov $1, %r9d
+    mov $2, %r9d
     call draw_glyph
 
     inc %r12d
@@ -1480,7 +1745,7 @@ render_adv_keys:
     push %rdi
     push %rsi
     sub $8, %rsp
-    movq $8, (%rsp)
+    movq $12, (%rsp)
     call draw_squircle
     add $8, %rsp
     pop %rsi
@@ -1489,11 +1754,11 @@ render_adv_keys:
     lea adv_key_types(%rip), %rax
     movzbq (%rax, %r12), %rbx
 
-    lea 26(%rdi), %edi
-    lea 26(%rsi), %esi
+    lea 27(%rdi), %edi
+    lea 17(%rsi), %esi
     mov %ebx, %edx
     mov $COL_TEXT_PRI, %r8d
-    mov $1, %r9d
+    mov $2, %r9d
     call draw_glyph
 
     inc %r12d
@@ -1551,7 +1816,7 @@ render_prog_keys:
     push %rdi
     push %rsi
     sub $8, %rsp
-    movq $8, (%rsp)
+    movq $12, (%rsp)
     call draw_squircle
     add $8, %rsp
     pop %rsi
@@ -1560,11 +1825,11 @@ render_prog_keys:
     lea prog_key_types(%rip), %rax
     movzbq (%rax, %r12), %rbx
 
-    lea 26(%rdi), %edi
-    lea 26(%rsi), %esi
+    lea 27(%rdi), %edi
+    lea 17(%rsi), %esi
     mov %ebx, %edx
     mov $COL_TEXT_PRI, %r8d
-    mov $1, %r9d
+    mov $2, %r9d
     call draw_glyph
 
     inc %r12d
@@ -1586,21 +1851,24 @@ render_popover:
     mov $COL_POPOVER_BG, %r8d
     mov $COL_POPOVER_BRD, %r9d
     sub $8, %rsp
-    movq $12, (%rsp)
+    movq $14, (%rsp)
     call draw_squircle
     add $8, %rsp
 
     # Item 0: Basic Mode
-    mov $COL_POPOVER_BG, %r8d
     cmpl $0, hover_menu(%rip)
     jne .m0_nh
-    mov $COL_POPOVER_HOV, %r8d
-.m0_nh:
     mov $16, %edi
     mov $56, %esi
     mov $222, %edx
     mov $36, %ecx
-    call draw_rect
+    mov $COL_POPOVER_HOV, %r8d
+    mov $COL_POPOVER_HOV, %r9d
+    sub $8, %rsp
+    movq $8, (%rsp)
+    call draw_squircle
+    add $8, %rsp
+.m0_nh:
 
     mov $135, %edx
     mov curr_mode(%rip), %eax
@@ -1622,16 +1890,19 @@ render_popover:
     call draw_string
 
     # Item 1: Advanced Mode
-    mov $COL_POPOVER_BG, %r8d
     cmpl $1, hover_menu(%rip)
     jne .m1_nh
-    mov $COL_POPOVER_HOV, %r8d
-.m1_nh:
     mov $16, %edi
     mov $94, %esi
     mov $222, %edx
     mov $36, %ecx
-    call draw_rect
+    mov $COL_POPOVER_HOV, %r8d
+    mov $COL_POPOVER_HOV, %r9d
+    sub $8, %rsp
+    movq $8, (%rsp)
+    call draw_squircle
+    add $8, %rsp
+.m1_nh:
 
     mov $135, %edx
     mov curr_mode(%rip), %eax
@@ -1653,16 +1924,19 @@ render_popover:
     call draw_string
 
     # Item 2: Programming Mode
-    mov $COL_POPOVER_BG, %r8d
     cmpl $2, hover_menu(%rip)
     jne .m2_nh
-    mov $COL_POPOVER_HOV, %r8d
-.m2_nh:
     mov $16, %edi
     mov $132, %esi
     mov $222, %edx
     mov $36, %ecx
-    call draw_rect
+    mov $COL_POPOVER_HOV, %r8d
+    mov $COL_POPOVER_HOV, %r9d
+    sub $8, %rsp
+    movq $8, (%rsp)
+    call draw_squircle
+    add $8, %rsp
+.m2_nh:
 
     mov $135, %edx
     mov curr_mode(%rip), %eax
@@ -1692,16 +1966,19 @@ render_popover:
     call draw_rect
 
     # Item 3: Clear History
-    mov $COL_POPOVER_BG, %r8d
     cmpl $3, hover_menu(%rip)
     jne .m3_nh
-    mov $COL_POPOVER_HOV, %r8d
-.m3_nh:
     mov $16, %edi
     mov $178, %esi
     mov $222, %edx
     mov $36, %ecx
-    call draw_rect
+    mov $COL_POPOVER_HOV, %r8d
+    mov $COL_POPOVER_HOV, %r9d
+    sub $8, %rsp
+    movq $8, (%rsp)
+    call draw_squircle
+    add $8, %rsp
+.m3_nh:
 
     mov $40, %edi
     mov $188, %esi
