@@ -27,10 +27,11 @@
 #
 # 3. In-House Software 2D Graphics Rasterizer:
 #    - draw_rect: Fast solid color fills via x86_64 'rep stosl'.
-#    - draw_squircle: Exact circular corner rasterization (cx^2 + cy^2 <= r^2) with
-#      1px antialiased borders, boundary clipping, and variable corner radii.
-#    - draw_glyph: 8x16 bitmap glyph renderer with arbitrary integer scaling (NxN)
-#      and strict screen-boundary clipping.
+#    - blend_pixel: Fast fixed-point ARGB alpha blending for subpixel antialiasing.
+#    - draw_squircle: 2x2 subpixel supersampled (SSAA) rounded corner rasterizer
+#      with smooth fractional alpha boundary blending and 1px borders.
+#    - draw_glyph: Anti-aliased typography renderer with 2x2 box subsampling
+#      and fractional coverage alpha blending against any background.
 #    - draw_string: High-performance string typography renderer.
 #
 # 4. Libadwaita Component Compositor & Layout:
@@ -102,7 +103,7 @@
 # ==============================================================================
 .section .rodata
 
-# 1. Embedded Bitmap Typography Font Data (104 glyphs, 8x16 pixels each)
+# 1. Embedded Antialiased Typography Font Data (105 glyphs, 16x32 pixels, 8-bit coverage)
 .align 16
 font_data:
     .incbin "font.bin"
@@ -1351,33 +1352,88 @@ draw_rect:
     ret
 
 # ------------------------------------------------------------------------------
+# blend_pixel:
+# Fixed-point alpha blender for 32-bit ARGB/XRGB pixels.
+# Computes: Out = Bg + (((Fg - Bg) * alpha + 128) >> 8) per color channel.
+#
+# Calling Convention:
+#   Inputs:  %edi = background color (0x00RRGGBB)
+#            %esi = foreground color (0x00RRGGBB)
+#            %edx = alpha coverage  (0..255)
+#   Output:  %eax = blended color   (0x00RRGGBB)
+#   Scratch: %ecx, %r8d
+# ------------------------------------------------------------------------------
+blend_pixel:
+    test %edx, %edx
+    jle .bp_ret_bg
+    cmp $255, %edx
+    jge .bp_ret_fg
+
+    # Red channel
+    mov %edi, %eax
+    shr $16, %eax
+    and $0xFF, %eax                      # bg_r
+    mov %esi, %ecx
+    shr $16, %ecx
+    and $0xFF, %ecx                      # fg_r
+    sub %eax, %ecx                       # fg_r - bg_r
+    imul %edx, %ecx                      # (fg_r - bg_r) * alpha
+    add $128, %ecx
+    sar $8, %ecx
+    add %ecx, %eax                       # blended r
+    shl $16, %eax
+    mov %eax, %r8d                       # r8d = r << 16
+
+    # Green channel
+    mov %edi, %eax
+    shr $8, %eax
+    and $0xFF, %eax                      # bg_g
+    mov %esi, %ecx
+    shr $8, %ecx
+    and $0xFF, %ecx                      # fg_g
+    sub %eax, %ecx                       # fg_g - bg_g
+    imul %edx, %ecx                      # (fg_g - bg_g) * alpha
+    add $128, %ecx
+    sar $8, %ecx
+    add %ecx, %eax                       # blended g
+    shl $8, %eax
+    or %eax, %r8d                        # r8d |= g << 8
+
+    # Blue channel
+    mov %edi, %eax
+    and $0xFF, %eax                      # bg_b
+    mov %esi, %ecx
+    and $0xFF, %ecx                      # fg_b
+    sub %eax, %ecx                       # fg_b - bg_b
+    imul %edx, %ecx                      # (fg_b - bg_b) * alpha
+    add $128, %ecx
+    sar $8, %ecx
+    add %ecx, %eax                       # blended b
+    or %r8d, %eax                        # eax = blended color
+    ret
+
+.bp_ret_bg:
+    mov %edi, %eax
+    ret
+.bp_ret_fg:
+    mov %esi, %eax
+    ret
+
+# ------------------------------------------------------------------------------
 # draw_squircle:
 # Rasterizes a rounded rectangle with circular corners of radius 'r' and a 1px border.
+# Applies 2x2 subpixel supersampling (SSAA) on curved corner boundaries for
+# ultra-smooth anti-aliasing against any background.
 #
 # Calling Convention:
 #   Inputs: %edi = x, %esi = y, %edx = width, %ecx = height
 #           %r8d = fill_color, %r9d = border_color
 #           16(%rbp) = corner radius (passed on stack)
-#
-# Algorithm:
-#   1. Clamps radius r to min(w/2, h/2).
-#   2. Calculates squared thresholds: r_sq = r * r, r_in_sq = (r - 1)^2.
-#   3. For each pixel (px, py):
-#      - Computes distance cx to horizontal corner curve, cy to vertical curve.
-#      - If inside corner bounding square:
-#          d2 = cx^2 + cy^2
-#          If d2 > r_sq: pixel is outside squircle (transparent/skipped).
-#          Else if d2 >= r_in_sq: pixel is on corner border -> writes border_color.
-#          Else: pixel is inside -> writes fill_color.
-#      - If in straight region:
-#          If on outer perimeter (px=0, py=0, px=w-1, py=h-1): writes border_color.
-#          Else: writes fill_color.
-#   4. Fully clipped against window dimensions (WIN_W, WIN_H).
 # ------------------------------------------------------------------------------
 draw_squircle:
     push %rbp
     mov %rsp, %rbp
-    sub $96, %rsp
+    sub $112, %rsp
     mov %r12, -8(%rbp)                   # Callee-saved register storage
     mov %r13, -16(%rbp)
     mov %r14, -24(%rbp)
@@ -1411,144 +1467,232 @@ draw_squircle:
     cmp %eax, %ebx
     cmovg %eax, %ebx
 
-    # Compute squared outer radius: r_sq = r * r
+    # Compute outer squared threshold: R_out_sq = 16 * r * r
     mov %ebx, %eax
     imul %ebx, %eax
+    shl $4, %eax
     mov %eax, -64(%rbp)
 
-    # Compute squared inner radius: r_in_sq = (r - 1) * (r - 1)
+    # Compute inner squared threshold: R_in_sq = 16 * (r - 1)^2
     lea -1(%ebx), %eax
+    test %eax, %eax
+    jle .sq_no_rin
     imul %eax, %eax
+    shl $4, %eax
+    jmp .sq_store_rin
+.sq_no_rin:
+    xor %eax, %eax
+.sq_store_rin:
     mov %eax, -72(%rbp)
 
-    xor %r11d, %r11d                     # %r11d = py (0..h-1)
+    movl $0, -80(%rbp)                   # py = 0
 .sq_row_loop:
-    cmp %r15d, %r11d
+    mov -80(%rbp), %eax
+    cmp %r15d, %eax
     jge .sq_done
 
-    mov %r13d, %eax
-    add %r11d, %eax                      # screen_y = y + py
-    cmp $WIN_H, %eax
-    jge .sq_row_next                     # Clip against window height
-    test %eax, %eax
+    mov %r13d, %edx
+    add %eax, %edx                       # screen_y = y + py
+    cmp $WIN_H, %edx
+    jge .sq_row_next
+    test %edx, %edx
     jl .sq_row_next
 
-    # Calculate corner distance cy:
-    # If py < r: cy = r - 1 - py
-    # Else if py >= h - r: cy = py - (h - r)
-    # Else: cy = 0 (straight edge)
-    xor %esi, %esi
-    cmp %ebx, %r11d
+    # Calculate corner distance qy:
+    # If py < r: qy = r - 1 - py
+    # Else if py >= h - r: qy = py - (h - r)
+    # Else: qy = -1
+    mov $-1, %ecx
+    cmp %ebx, %eax
     jge .sq_chk_by
-    mov %ebx, %esi
-    sub $1, %esi
-    sub %r11d, %esi
-    jmp .sq_got_cy
+    mov %ebx, %ecx
+    sub $1, %ecx
+    sub %eax, %ecx
+    jmp .sq_got_qy
 .sq_chk_by:
-    mov %r15d, %edx
-    sub %ebx, %edx                       # h - r
-    cmp %edx, %r11d
-    jl .sq_got_cy
-    mov %r11d, %esi
-    sub %edx, %esi                       # py - (h - r)
-.sq_got_cy:
-    mov %esi, -80(%rbp)                  # Store cy
+    mov %r15d, %esi
+    sub %ebx, %esi                       # h - r
+    cmp %esi, %eax
+    jl .sq_got_qy
+    mov %eax, %ecx
+    sub %esi, %ecx                       # py - (h - r)
+.sq_got_qy:
+    mov %ecx, -88(%rbp)                  # Store qy
 
     # Base framebuffer pointer for this row: fb_ptr + 4 * (screen_y * WIN_W + x)
-    imul $WIN_W, %eax
-    add %r12d, %eax
-    shl $2, %rax
-    add fb_ptr(%rip), %rax
-    mov %rax, %rcx                       # %rcx = pixel write pointer
+    imul $WIN_W, %edx
+    add %r12d, %edx
+    shl $2, %rdx
+    add fb_ptr(%rip), %rdx
+    mov %rdx, -104(%rbp)                 # Store pixel pointer
 
-    xor %r10d, %r10d                     # %r10d = px (0..w-1)
+    movl $0, -96(%rbp)                   # px = 0
 .sq_col_loop:
-    cmp %r14d, %r10d
+    mov -96(%rbp), %eax
+    cmp %r14d, %eax
     jge .sq_row_next
 
-    mov %r12d, %eax
-    add %r10d, %eax                      # screen_x = x + px
-    cmp $WIN_W, %eax
-    jge .sq_col_skip                     # Clip against window width
-    test %eax, %eax
-    jl .sq_col_skip
+    mov %r12d, %edx
+    add %eax, %edx                       # screen_x = x + px
+    cmp $WIN_W, %edx
+    jge .sq_col_next
+    test %edx, %edx
+    jl .sq_col_next
 
-    # Calculate corner distance cx:
-    # If px < r: cx = r - 1 - px
-    # Else if px >= w - r: cx = px - (w - r)
-    # Else: cx = 0
-    xor %edi, %edi
-    cmp %ebx, %r10d
+    # Calculate corner distance qx:
+    # If px < r: qx = r - 1 - px
+    # Else if px >= w - r: qx = px - (w - r)
+    # Else: qx = -1
+    mov $-1, %ecx
+    cmp %ebx, %eax
     jge .sq_chk_rx
-    mov %ebx, %edi
-    sub $1, %edi
-    sub %r10d, %edi
-    jmp .sq_eval_pixel
+    mov %ebx, %ecx
+    sub $1, %ecx
+    sub %eax, %ecx
+    jmp .sq_got_qx
 .sq_chk_rx:
-    mov %r14d, %edx
-    sub %ebx, %edx                       # w - r
-    cmp %edx, %r10d
-    jl .sq_eval_pixel
-    mov %r10d, %edi
-    sub %edx, %edi                       # px - (w - r)
+    mov %r14d, %esi
+    sub %ebx, %esi                       # w - r
+    cmp %esi, %eax
+    jl .sq_got_qx
+    mov %eax, %ecx
+    sub %esi, %ecx                       # px - (w - r)
+.sq_got_qx:
+    # Corner check: both qx >= 0 and qy >= 0
+    test %ecx, %ecx
+    jl .sq_straight
+    cmpl $0, -88(%rbp)
+    jl .sq_straight
 
-.sq_eval_pixel:
-    mov -80(%rbp), %esi                  # Restore cy
-    test %edi, %edi
-    jz .sq_straight                      # cx == 0 -> straight segment
-    test %esi, %esi
-    jz .sq_straight                      # cy == 0 -> straight segment
+    # Subsampling in corner: test 4 subpixel sample coordinates
+    # x0 = 4*qx + 1, x1 = 4*qx + 3
+    # y0 = 4*qy + 1, y1 = 4*qy + 3
+    lea 1(,%rcx,4), %esi                 # x0
+    imul %esi, %esi                      # sx0 = x0^2
+    lea 3(,%rcx,4), %edi                 # x1
+    imul %edi, %edi                      # sx1 = x1^2
 
-    # Corner pixel: evaluate squared Euclidean distance d2 = cx^2 + cy^2
-    mov %edi, %eax
-    imul %edi, %eax                      # cx^2
-    mov %esi, %edx
-    imul %esi, %edx                      # cy^2
-    add %edx, %eax                       # d2 = cx^2 + cy^2
+    mov -88(%rbp), %ecx                  # qy
+    lea 1(,%rcx,4), %edx                 # y0
+    imul %edx, %edx                      # sy0 = y0^2
+    lea 3(,%rcx,4), %ecx                 # y1
+    imul %ecx, %ecx                      # sy1 = y1^2
 
-    cmp -64(%rbp), %eax                  # d2 > r_sq ?
-    jg .sq_col_skip                      # Outside corner circle: transparent/skip
+    # d00 = sx0 + sy0, d10 = sx1 + sy0, d01 = sx0 + sy1, d11 = sx1 + sy1
+    lea (%rsi, %rdx), %r8d               # d00
+    lea (%rdi, %rdx), %r9d               # d10
+    lea (%rsi, %rcx), %r10d              # d01
+    lea (%rdi, %rcx), %r11d              # d11
 
-    cmp -72(%rbp), %eax                  # d2 >= r_in_sq ?
-    jge .sq_write_border                 # In 1px border zone
-    jmp .sq_write_fill                   # Inside corner
+    # Count N_out (how many subpixels <= R_out_sq)
+    mov -64(%rbp), %eax                  # R_out_sq
+    xor %ecx, %ecx
+    cmp %eax, %r8d
+    jg 1f
+    inc %ecx
+1:  cmp %eax, %r9d
+    jg 2f
+    inc %ecx
+2:  cmp %eax, %r10d
+    jg 3f
+    inc %ecx
+3:  cmp %eax, %r11d
+    jg 4f
+    inc %ecx
+4:
+    test %ecx, %ecx
+    jz .sq_col_next                      # N_out == 0: outside corner, transparent
+
+    cmp $4, %ecx
+    je .sq_eval_inner                    # N_out == 4: fully within outer radius
+
+    # Boundary antialiasing: alpha = N_out * 64
+    shl $6, %ecx
+    mov -104(%rbp), %rax
+    mov (%rax), %edi                     # bg = *pixel
+    mov -56(%rbp), %esi                  # fg = border_color
+    mov %ecx, %edx                       # alpha
+    call blend_pixel
+    mov -104(%rbp), %rdx
+    mov %eax, (%rdx)
+    jmp .sq_col_next
+
+.sq_eval_inner:
+    # If border_color == fill_color, write fill directly
+    mov -56(%rbp), %eax
+    cmp -48(%rbp), %eax
+    je .sq_write_fill
+
+    # Count N_in (how many subpixels <= R_in_sq)
+    mov -72(%rbp), %eax                  # R_in_sq
+    xor %ecx, %ecx
+    cmp %eax, %r8d
+    jg 1f
+    inc %ecx
+1:  cmp %eax, %r9d
+    jg 2f
+    inc %ecx
+2:  cmp %eax, %r10d
+    jg 3f
+    inc %ecx
+3:  cmp %eax, %r11d
+    jg 4f
+    inc %ecx
+4:
+    cmp $4, %ecx
+    je .sq_write_fill                    # N_in == 4: pure fill
+    test %ecx, %ecx
+    jz .sq_write_border                  # N_in == 0: pure border
+
+    # Inner transition antialiasing (N_in in 1..3)
+    shl $6, %ecx
+    mov -56(%rbp), %edi                  # bg = border_color
+    mov -48(%rbp), %esi                  # fg = fill_color
+    mov %ecx, %edx                       # alpha
+    call blend_pixel
+    mov -104(%rbp), %rdx
+    mov %eax, (%rdx)
+    jmp .sq_col_next
 
 .sq_straight:
     # Straight segment border check (outer 1px perimeter)
-    test %r10d, %r10d                    # px == 0
+    mov -96(%rbp), %eax                  # px
+    test %eax, %eax
     jz .sq_write_border
-    mov %r14d, %eax
-    dec %eax
-    cmp %eax, %r10d                      # px == w - 1
+    mov %r14d, %edx
+    dec %edx
+    cmp %edx, %eax                       # px == w - 1
     je .sq_write_border
 
-    test %r11d, %r11d                    # py == 0
+    mov -80(%rbp), %eax                  # py
+    test %eax, %eax
     jz .sq_write_border
-    mov %r15d, %eax
-    dec %eax
-    cmp %eax, %r11d                      # py == h - 1
+    mov %r15d, %edx
+    dec %edx
+    cmp %edx, %eax                       # py == h - 1
     je .sq_write_border
 
 .sq_write_fill:
     mov -48(%rbp), %eax
-    mov %eax, (%rcx)                     # Write fill color
-    jmp .sq_col_skip
+    mov -104(%rbp), %rdx
+    mov %eax, (%rdx)
+    jmp .sq_col_next
 
 .sq_write_border:
     mov -56(%rbp), %eax
-    mov %eax, (%rcx)                     # Write border color
+    mov -104(%rbp), %rdx
+    mov %eax, (%rdx)
 
-.sq_col_skip:
-    add $4, %rcx                         # Advance pixel pointer
-    inc %r10d
+.sq_col_next:
+    addq $4, -104(%rbp)
+    incl -96(%rbp)
     jmp .sq_col_loop
 
 .sq_row_next:
-    inc %r11d
+    incl -80(%rbp)
     jmp .sq_row_loop
 
 .sq_fallback:
-    # Fallback to rectangular fill if r <= 0
     mov %r12d, %edi
     mov %r13d, %esi
     mov %r14d, %edx
@@ -1567,21 +1711,23 @@ draw_squircle:
 
 # ------------------------------------------------------------------------------
 # draw_glyph:
-# Renders an 8x16 1-bit bitmap font glyph into the framebuffer.
+# Renders an anti-aliased font glyph into the framebuffer with pixel subsampling.
 #
 # Calling Convention:
 #   Inputs: %edi = x, %esi = y, %edx = glyph_id/ascii, %r8d = color, %r9d = scale
 #
 # Features:
-#   - Supports arbitrary integer scaling (e.g. 1x, 2x) by stretching each font
-#     bit into a (scale x scale) block of pixels.
+#   - 16x32 native anti-aliased typography stored with 8-bit alpha coverage.
+#   - Scale 2: Direct 16x32 anti-aliased glyph blit with per-pixel alpha blending.
+#   - Scale 1: 2x2 box subsampling filter downsampling 16x32 to 8x16 with fractional
+#              coverage alpha blending.
 #   - Boundary clipping: guarantees no pixel writes outside [0..WIN_W-1, 0..WIN_H-1].
 # ------------------------------------------------------------------------------
 draw_glyph:
     push %rbp
     mov %rsp, %rbp
     sub $80, %rsp
-    mov %r12, -8(%rbp)                   # Save callee-saved registers
+    mov %r12, -8(%rbp)                   # Callee-saved register storage
     mov %r13, -16(%rbp)
     mov %r14, -24(%rbp)
     mov %r15, -32(%rbp)
@@ -1594,92 +1740,167 @@ draw_glyph:
 
     # Validate glyph ID: font covers glyphs 32 to 136 (105 glyphs total)
     sub $32, %edx
-    cmp $106, %edx
+    cmp $105, %edx
+    ja .dg_ret
+
+    # Glyph data offset = glyph_index * 512 bytes (512 = 16 * 32 bytes)
+    shl $9, %rdx
+    lea font_data(%rip), %r14
+    add %rdx, %r14                       # %r14 = pointer to 512-byte glyph bitmap
+
+    cmpq $2, -56(%rbp)
+    je .dg_scale2
+
+    # Scale 1: 8 columns x 16 rows with 2x2 box subsampling
+    movl $0, -80(%rbp)                   # gy = 0
+.dg_s1_row_loop:
+    mov -80(%rbp), %eax
+    cmp $16, %eax
     jge .dg_ret
+
+    mov %r13d, %edx
+    add %eax, %edx                       # py = y + gy
+    cmp $WIN_H, %edx
+    jge .dg_s1_row_next
     test %edx, %edx
-    jl .dg_ret
+    jl .dg_s1_row_next
 
-    # Glyph data offset = glyph_index * 16 bytes
-    shl $4, %rdx
-    lea font_data(%rip), %rax
-    add %rdx, %rax
-    mov %rax, %r14                       # %r14 = pointer to 16-byte glyph bitmap
+    # Row framebuffer base: fb_ptr + 4 * (py * WIN_W + x)
+    imul $WIN_W, %edx
+    add %r12d, %edx
+    shl $2, %rdx
+    add fb_ptr(%rip), %rdx
+    mov %rdx, -72(%rbp)                  # pixel_ptr
 
-    xor %r15d, %r15d                     # %r15d = font row index (0..15)
-.dg_row_loop:
-    cmp $16, %r15d
-    jge .dg_ret
-    movzbq (%r14, %r15), %rbx            # Read 8-bit row byte (MSB = leftmost pixel)
-
-    xor %ecx, %ecx                       # %ecx = font column index (0..7)
-.dg_col_loop:
-    cmp $8, %ecx
-    jge .dg_row_next
-    mov $7, %edx
-    sub %ecx, %edx                       # Bit index: 7 - col
-    bt %rdx, %rbx                        # Test if pixel bit is set
-    jnc .dg_col_next
-
-    # Active pixel bit! Compute top-left corner of the scaled pixel block
-    mov -56(%rbp), %eax
-    imul %ecx, %eax
-    add %r12d, %eax
-    mov %eax, -64(%rbp)                  # base_x = x + col * scale
-
-    mov -56(%rbp), %eax
-    imul %r15d, %eax
-    add %r13d, %eax
-    mov %eax, -72(%rbp)                  # base_y = y + row * scale
-
-    # Render (scale x scale) block of pixels
-    xor %edx, %edx                       # sy = 0..scale-1
-.dg_sy_loop:
-    cmp -56(%rbp), %edx
-    jge .dg_col_next
-
-    mov -72(%rbp), %eax
-    add %edx, %eax                       # py = base_y + sy
-    cmp $WIN_H, %eax                     # Clip against window height
-    jge .dg_sy_next
-    test %eax, %eax
-    jl .dg_sy_next
-
-    imul $WIN_W, %eax
-    mov %eax, %esi
-
-    xor %edi, %edi                       # sx = 0..scale-1
-.dg_sx_loop:
-    cmp -56(%rbp), %edi
-    jge .dg_sy_next
-
+    movl $0, -64(%rbp)                   # gx = 0
+.dg_s1_col_loop:
     mov -64(%rbp), %eax
-    add %edi, %eax                       # px = base_x + sx
-    cmp $WIN_W, %eax                     # Clip against window width
-    jge .dg_sx_next
+    cmp $8, %eax
+    jge .dg_s1_row_next
+
+    mov %r12d, %edx
+    add %eax, %edx                       # px = x + gx
+    cmp $WIN_W, %edx
+    jge .dg_s1_col_next
+    test %edx, %edx
+    jl .dg_s1_col_next
+
+    # 2x2 subsampling filter:
+    # row0 = gy * 2, col0 = gx * 2 -> offset = (gy * 2) * 16 + gx * 2 = gy * 32 + gx * 2
+    mov -80(%rbp), %ecx                  # gy
+    shl $5, %ecx                         # gy * 32
+    mov -64(%rbp), %edx                  # gx
+    shl $1, %edx                         # gx * 2
+    add %edx, %ecx                       # offset
+
+    movzbl (%r14, %rcx), %eax            # a00
+    movzbl 1(%r14, %rcx), %edx           # a10
+    add %edx, %eax
+    movzbl 16(%r14, %rcx), %edx          # a01
+    add %edx, %eax
+    movzbl 17(%r14, %rcx), %edx          # a11
+    add %edx, %eax
+    add $2, %eax
+    shr $2, %eax                         # alpha in 0..255
+
     test %eax, %eax
-    jl .dg_sx_next
+    jz .dg_s1_col_next
 
-    add %esi, %eax
-    shl $2, %rax
-    add fb_ptr(%rip), %rax               # Framebuffer target address
-    mov -48(%rbp), %r8d
-    mov %r8d, (%rax)                     # Write 32-bit pixel color
+    cmp $255, %eax
+    je .dg_s1_solid
 
-.dg_sx_next:
-    inc %edi
-    jmp .dg_sx_loop
+    # Fractional alpha blending with background
+    mov -72(%rbp), %rdx
+    mov (%rdx), %edi                     # bg
+    mov -48(%rbp), %esi                  # fg = color
+    mov %eax, %edx                       # alpha
+    call blend_pixel
+    mov -72(%rbp), %rdx
+    mov %eax, (%rdx)
+    jmp .dg_s1_col_next
 
-.dg_sy_next:
-    inc %edx
-    jmp .dg_sy_loop
+.dg_s1_solid:
+    mov -48(%rbp), %eax
+    mov -72(%rbp), %rdx
+    mov %eax, (%rdx)
 
-.dg_col_next:
-    inc %ecx
-    jmp .dg_col_loop
+.dg_s1_col_next:
+    addq $4, -72(%rbp)
+    incl -64(%rbp)
+    jmp .dg_s1_col_loop
 
-.dg_row_next:
-    inc %r15d
-    jmp .dg_row_loop
+.dg_s1_row_next:
+    incl -80(%rbp)
+    jmp .dg_s1_row_loop
+
+    # Scale 2: 16 columns x 32 rows direct anti-aliased glyph
+.dg_scale2:
+    movl $0, -80(%rbp)                   # gy = 0
+.dg_s2_row_loop:
+    mov -80(%rbp), %eax
+    cmp $32, %eax
+    jge .dg_ret
+
+    mov %r13d, %edx
+    add %eax, %edx                       # py = y + gy
+    cmp $WIN_H, %edx
+    jge .dg_s2_row_next
+    test %edx, %edx
+    jl .dg_s2_row_next
+
+    imul $WIN_W, %edx
+    add %r12d, %edx
+    shl $2, %rdx
+    add fb_ptr(%rip), %rdx
+    mov %rdx, -72(%rbp)                  # pixel_ptr
+
+    movl $0, -64(%rbp)                   # gx = 0
+.dg_s2_col_loop:
+    mov -64(%rbp), %eax
+    cmp $16, %eax
+    jge .dg_s2_row_next
+
+    mov %r12d, %edx
+    add %eax, %edx                       # px = x + gx
+    cmp $WIN_W, %edx
+    jge .dg_s2_col_next
+    test %edx, %edx
+    jl .dg_s2_col_next
+
+    # Offset in 16x32 font: gy * 16 + gx
+    mov -80(%rbp), %ecx
+    shl $4, %ecx
+    add -64(%rbp), %ecx
+    movzbq (%r14, %rcx), %rax            # alpha
+
+    test %eax, %eax
+    jz .dg_s2_col_next
+
+    cmp $255, %eax
+    je .dg_s2_solid
+
+    mov -72(%rbp), %rdx
+    mov (%rdx), %edi                     # bg
+    mov -48(%rbp), %esi                  # fg = color
+    mov %eax, %edx                       # alpha
+    call blend_pixel
+    mov -72(%rbp), %rdx
+    mov %eax, (%rdx)
+    jmp .dg_s2_col_next
+
+.dg_s2_solid:
+    mov -48(%rbp), %eax
+    mov -72(%rbp), %rdx
+    mov %eax, (%rdx)
+
+.dg_s2_col_next:
+    addq $4, -72(%rbp)
+    incl -64(%rbp)
+    jmp .dg_s2_col_loop
+
+.dg_s2_row_next:
+    incl -80(%rbp)
+    jmp .dg_s2_row_loop
 
 .dg_ret:
     mov -8(%rbp), %r12

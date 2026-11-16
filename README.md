@@ -14,8 +14,8 @@ A modern, standalone desktop calculator built **100% in pure x86_64 Linux assemb
   - Client-Side Decorations (CSD): Custom headerbar with title, hamburger menu, history clock button, and close button, with window decorations suppressed via `_MOTIF_WM_HINTS`.
   - Window Dragging: Native interactive window movement via EWMH `_NET_WM_MOVERESIZE`.
   - Physical Window Rounded Corners: Physical window clipped to $r=16\text{px}$ using the **X11 Shape Extension** (`ShapeRectangles`).
-  - Smooth Antialiased Squircles: Custom rasterizer for rounded corners ($cx^2 + cy^2 \le r^2$) with 1px borders across all buttons, cards, and popovers.
-  - Enlarged Bold Typography: Modern $8\times 16$ bitmap glyphs synthesized from `AdwaitaMono-Bold.ttf`, rendered with integer scaling ($2\times$) and boundary clipping.
+  - True Subpixel Supersampling (SSAA): $2\times 2$ pixel subsampling on curved squircle boundaries with fixed-point alpha blending (0%, 25%, 50%, 75%, 100%) for ultra-smooth rounded corners against any background.
+  - Modern Antialiased Typography: Native $16\times 32$ antialiased typography synthesized from `AdwaitaSans-Regular.ttf` with 8-bit coverage; renders with direct alpha blending ($2\times$) and $2\times 2$ box subsampling ($1\times$) for crisp, vector-quality text.
 
 - **Fully Functional Calculation History & Journal**:
   - **Live Expression Display**: Current ongoing calculation expression is rendered clearly in the display card (e.g. `12 + 4 =`, `sin(45) =`, `0xFF & 0x0F =`).
@@ -40,7 +40,7 @@ A modern, standalone desktop calculator built **100% in pure x86_64 Linux assemb
 Assembly-Calculator/
 ├── calc_ui.s      # UI Subsystem, Direct X11 Socket Driver & Software Rasterizer
 ├── calc_core.s    # Arithmetic Engine, x87 FPU Math, Radix Formatters & Keypad Dispatch
-├── font.bin       # Embedded 105-glyph 8x16 bitmap typography font (includes Clock icon)
+├── font.bin       # Embedded 105-glyph 16x32 antialiased typography font (8-bit coverage, includes Clock icon)
 ├── Makefile       # Standalone build automation (as + ld + strip)
 └── README.md      # Comprehensive architecture and technical documentation
 ```
@@ -61,8 +61,9 @@ Assembly-Calculator/
   - `render_history_popover`: Renders modern Libadwaita popover card displaying past calculations with hover states and recall interactions.
 - **Software Graphics Engine**:
   - `draw_rect`: Solid color fills using `rep stosl`.
-  - `draw_squircle`: Evaluates Euclidean distance $(x - cx)^2 + (y - cy)^2 \le r^2$ with 1px border generation and clipping.
-  - `draw_glyph`: $8\times 16$ font glyphs rendered with arbitrary integer scaling ($scale \times scale$) and screen-boundary protection.
+  - `blend_pixel`: High-speed fixed-point ARGB alpha blender ($B + (((F - B) \cdot \alpha + 128) \gg 8)$).
+  - `draw_squircle`: $2\times 2$ subpixel supersampled (SSAA) rounded corner rasterizer with smooth fractional alpha boundary blending and 1px borders.
+  - `draw_glyph`: Anti-aliased typography renderer supporting $2\times 2$ box subsampling and fractional coverage alpha blending against any background.
   - `draw_string`: Null-terminated string rendering with horizontal cursor advancement.
 - **Event Dispatcher**:
   - Polls socket with `sys_poll` (20ms timeout).
