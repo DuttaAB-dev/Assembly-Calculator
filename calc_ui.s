@@ -1130,7 +1130,7 @@ x11_init_window:
     syscall
 
     # 3. Set WM_NAME = "Calculator" (ChangeProperty, Opcode 18)
-    movl $0x00080012, (%rsp)             # Opcode 18, Length 8
+    movl $0x00090012, (%rsp)             # Opcode 18, Length 9
     mov win_id(%rip), %eax
     mov %eax, 4(%rsp)                    # Window ID
     movl $39, 8(%rsp)                    # Property: XA_WM_NAME (39)
