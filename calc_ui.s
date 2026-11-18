@@ -110,11 +110,11 @@ font_data:
 
 # 1b. CLI Information Strings
 str_version:
-    .ascii "Assembly-Calculator v1.0.0 (x86_64-linux, pure assembly, direct X11)\n"
+    .ascii "Assembly-Calculator v1.1.0 (x86_64-linux, pure assembly, direct X11)\n"
     .equ STR_VERSION_LEN, . - str_version
 
 str_help:
-    .ascii "Assembly-Calculator v1.0.0 - Standalone x86_64 Linux Desktop Calculator\n"
+    .ascii "Assembly-Calculator v1.1.0 - Standalone x86_64 Linux Desktop Calculator\n"
     .ascii "Usage: calculator [OPTIONS]\n\n"
     .ascii "Options:\n"
     .ascii "  -v, --version               Print version information and exit\n"
