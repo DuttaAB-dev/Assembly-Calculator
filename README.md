@@ -1,4 +1,4 @@
-# Assembly-Calculator (v1.0.0)
+# Assembly-Calculator (v1.1.0)
 
 [![Release](https://img.shields.io/github/v/release/DuttaAB-dev/Assembly-Calculator?color=3584E4&label=version)](https://github.com/DuttaAB-dev/Assembly-Calculator/releases/latest)
 [![Binary Size](https://img.shields.io/badge/binary%20size-74%20KB-success)](https://github.com/DuttaAB-dev/Assembly-Calculator/releases/latest)
@@ -16,13 +16,13 @@ It features **zero external dependencies** — no C runtime (`libc`), no GTK, no
 
 Pre-compiled, statically linked standalone binaries (74 KB ELF) with zero dependencies are available on the [**Releases Page**](https://github.com/DuttaAB-dev/Assembly-Calculator/releases):
 
-### Download & Run v1.0.0
+### Download & Run v1.1.0
 ```bash
 # Download the compressed release archive
-wget https://github.com/DuttaAB-dev/Assembly-Calculator/releases/download/v1.0.0/assembly-calculator-v1.0.0-linux-x86_64.tar.gz
+wget https://github.com/DuttaAB-dev/Assembly-Calculator/releases/download/v1.1.0/assembly-calculator-v1.1.0-linux-x86_64.tar.gz
 
 # Extract the archive
-tar -xzf assembly-calculator-v1.0.0-linux-x86_64.tar.gz
+tar -xzf assembly-calculator-v1.1.0-linux-x86_64.tar.gz
 
 # Run directly on any x86_64 Linux system
 ./assembly-calculator
@@ -30,7 +30,7 @@ tar -xzf assembly-calculator-v1.0.0-linux-x86_64.tar.gz
 
 Or download the standalone executable directly:
 ```bash
-wget https://github.com/DuttaAB-dev/Assembly-Calculator/releases/download/v1.0.0/assembly-calculator
+wget https://github.com/DuttaAB-dev/Assembly-Calculator/releases/download/v1.1.0/assembly-calculator
 chmod +x assembly-calculator
 ./assembly-calculator
 ```
@@ -65,7 +65,7 @@ chmod +x assembly-calculator
   - **Programmer Mode**: 5x6 keypad layout with 64-bit integer signed arithmetic, bitwise logic (`&`, `|`, `^`, `~`, `<<`, `>>`), hexadecimal entry (`A`–`F`), and a live synchronized 4-base inspector displaying **HEX**, **DEC**, **OCT**, and **BIN** representations.
 
 - **Command-Line Interface**:
-  - `-v`, `--version`: Prints version metadata (`Assembly-Calculator v1.0.0`).
+  - `-v`, `--version`: Prints version metadata (`Assembly-Calculator v1.1.0`).
   - `-h`, `--help`: Prints comprehensive command-line options and usage syntax.
   - `--dump <file.ppm> [mode] [m|h]`: Headless CI rendering engine that renders pixel-accurate Netpbm PPM frames without requiring an X server or display connection.
 
@@ -145,7 +145,7 @@ The resulting executable is a standalone, statically linked ELF binary (`calcula
 ```bash
 make release
 ```
-Creates `dist/assembly-calculator`, `dist/assembly-calculator-v1.0.0-linux-x86_64.tar.gz`, and `dist/SHA256SUMS.txt`.
+Creates `dist/assembly-calculator`, `dist/assembly-calculator-v1.1.0-linux-x86_64.tar.gz`, and `dist/SHA256SUMS.txt`.
 
 ### Headless Verification (Frame Dump)
 To render and verify the UI headlessly without an X server:
@@ -177,6 +177,11 @@ make dump
 ---
 
 ## Release History
+
+### v1.1.0 (UX & Physical Rounded Corners Release)
+- **Physical Window Rounded Corners**: Corrected X11 wire protocol packet header alignment and `WM_NAME` socket length to properly enable direct X11 Shape Extension clipping (`ShapeBounding` and `ShapeClip`), eliminating sharp 90-degree outer corner triangles.
+- **Keypad UX Redesign**: Replaced the isolated open-bracket key `'('` in Basic mode with `±` (toggle sign / negation) and added `%` (percentage division via x87 FPU) across all modes.
+- **Streamlined Stability**: Zero libc, zero external dependencies, robust socket protocol synchronization.
 
 ### v1.0.0 (Initial Release)
 - **Zero-Dependency x86_64 Assembly Engine**: Full standalone calculator implemented in pure Linux assembly.

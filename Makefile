@@ -5,7 +5,7 @@
 # Toolchain: GNU Assembler (as) and GNU Linker (ld).
 # ==============================================================================
 
-VERSION ?= 1.0.0
+VERSION ?= 1.1.0
 PKG_NAME := assembly-calculator-v$(VERSION)-linux-x86_64
 
 AS ?= as

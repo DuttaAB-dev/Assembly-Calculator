@@ -13,7 +13,7 @@
 .global exec_basic_key, exec_adv_key, exec_prog_key
 .global eval_expression, update_prog_readouts
 .global parse_double, format_double, parse_int64
-.global op_add, op_sub, op_mul, op_div
+.global op_add, op_sub, op_mul, op_div, op_percent
 
 # ------------------------------------------------------------------------------
 # External State Variables & History Callbacks (Defined in calc_ui.s)
@@ -41,6 +41,7 @@
 .align 8
 
 # Floating-point constants for decimal conversion and scientific functions
+fp_hundred: .double 100.0                   # Multiplier/divisor for percentage
 fp_ten:     .double 10.0                    # Base-10 multiplier for digit extraction
 fp_eps:     .double 0.00000001              # Epsilon threshold for zero rounding (1e-8)
 fp_deg2rad: .double 0.017453292519943295    # Multiplier: Degrees to Radians (pi / 180)
@@ -214,13 +215,36 @@ toggle_sign:
     ret
 
 # ------------------------------------------------------------------------------
+# op_percent:
+# Percentage calculation: divides active display value by 100.
+# ------------------------------------------------------------------------------
+op_percent:
+    mov curr_mode(%rip), %eax
+    cmp $2, %eax
+    je .pct_ret
+
+    lea disp_buf(%rip), %rsi
+    cmpb $0, (%rsi)
+    je .pct_ret
+
+    call parse_double                    # ST(0) = parsed display value
+    fldl fp_hundred(%rip)                # ST(0) = 100.0, ST(1) = val
+    fdivrp %st, %st(1)                   # ST(0) = val / 100.0
+
+    lea disp_buf(%rip), %rdi
+    call format_double
+    movl $1, clr_next(%rip)
+.pct_ret:
+    ret
+
+# ------------------------------------------------------------------------------
 # exec_basic_key:
 # Dispatches keypad click events for Basic Calculator mode.
 # ------------------------------------------------------------------------------
 exec_basic_key:
     cmp $0, %eax; je clear_disp
     cmp $1, %eax; je bksp_disp
-    cmp $2, %eax; je toggle_sign
+    cmp $2, %eax; je op_percent
     cmp $3, %eax; je op_div
     cmp $4, %eax; je .d7
     cmp $5, %eax; je .d8
@@ -234,7 +258,7 @@ exec_basic_key:
     cmp $13, %eax; je .d2
     cmp $14, %eax; je .d3
     cmp $15, %eax; je op_add
-    cmp $16, %eax; je .d_lparen
+    cmp $16, %eax; je toggle_sign
     cmp $17, %eax; je .d0
     cmp $18, %eax; je .d_dot
     cmp $19, %eax; je eval_expression
@@ -708,7 +732,7 @@ exec_adv_key:
     cmp $0, %eax; je .f_sin
     cmp $1, %eax; je clear_disp
     cmp $2, %eax; je bksp_disp
-    cmp $3, %eax; je toggle_sign
+    cmp $3, %eax; je op_percent
     cmp $4, %eax; je op_div
 
     cmp $5, %eax; je .f_cos
@@ -730,7 +754,7 @@ exec_adv_key:
     cmp $19, %eax; je op_add
 
     cmp $20, %eax; je .f_pi
-    cmp $21, %eax; je .d_lparen
+    cmp $21, %eax; je toggle_sign
     cmp $22, %eax; je .d0
     cmp $23, %eax; je .d_dot
     cmp $24, %eax; je eval_expression
