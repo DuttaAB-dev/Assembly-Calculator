@@ -1,4 +1,4 @@
-# Assembly-Calculator (v1.1.0)
+# Assembly-Calculator (v1.2.0)
 
 [![Release](https://img.shields.io/github/v/release/DuttaAB-dev/Assembly-Calculator?color=3584E4&label=version)](https://github.com/DuttaAB-dev/Assembly-Calculator/releases/latest)
 [![Binary Size](https://img.shields.io/badge/binary%20size-74%20KB-success)](https://github.com/DuttaAB-dev/Assembly-Calculator/releases/latest)
@@ -16,13 +16,13 @@ It features **zero external dependencies** — no C runtime (`libc`), no GTK, no
 
 Pre-compiled, statically linked standalone binaries (74 KB ELF) with zero dependencies are available on the [**Releases Page**](https://github.com/DuttaAB-dev/Assembly-Calculator/releases):
 
-### Download & Run v1.1.0
+### Download & Run v1.2.0
 ```bash
 # Download the compressed release archive
-wget https://github.com/DuttaAB-dev/Assembly-Calculator/releases/download/v1.1.0/assembly-calculator-v1.1.0-linux-x86_64.tar.gz
+wget https://github.com/DuttaAB-dev/Assembly-Calculator/releases/download/v1.2.0/assembly-calculator-v1.2.0-linux-x86_64.tar.gz
 
 # Extract the archive
-tar -xzf assembly-calculator-v1.1.0-linux-x86_64.tar.gz
+tar -xzf assembly-calculator-v1.2.0-linux-x86_64.tar.gz
 
 # Run directly on any x86_64 Linux system
 ./assembly-calculator
@@ -30,7 +30,7 @@ tar -xzf assembly-calculator-v1.1.0-linux-x86_64.tar.gz
 
 Or download the standalone executable directly:
 ```bash
-wget https://github.com/DuttaAB-dev/Assembly-Calculator/releases/download/v1.1.0/assembly-calculator
+wget https://github.com/DuttaAB-dev/Assembly-Calculator/releases/download/v1.2.0/assembly-calculator
 chmod +x assembly-calculator
 ./assembly-calculator
 ```
@@ -65,7 +65,7 @@ chmod +x assembly-calculator
   - **Programmer Mode**: 5x6 keypad layout with 64-bit integer signed arithmetic, bitwise logic (`&`, `|`, `^`, `~`, `<<`, `>>`), hexadecimal entry (`A`–`F`), and a live synchronized 4-base inspector displaying **HEX**, **DEC**, **OCT**, and **BIN** representations.
 
 - **Command-Line Interface**:
-  - `-v`, `--version`: Prints version metadata (`Assembly-Calculator v1.1.0`).
+  - `-v`, `--version`: Prints version metadata (`Assembly-Calculator v1.2.0`).
   - `-h`, `--help`: Prints comprehensive command-line options and usage syntax.
   - `--dump <file.ppm> [mode] [m|h]`: Headless CI rendering engine that renders pixel-accurate Netpbm PPM frames without requiring an X server or display connection.
 
@@ -145,7 +145,7 @@ The resulting executable is a standalone, statically linked ELF binary (`calcula
 ```bash
 make release
 ```
-Creates `dist/assembly-calculator`, `dist/assembly-calculator-v1.1.0-linux-x86_64.tar.gz`, and `dist/SHA256SUMS.txt`.
+Creates `dist/assembly-calculator`, `dist/assembly-calculator-v1.2.0-linux-x86_64.tar.gz`, and `dist/SHA256SUMS.txt`.
 
 ### Headless Verification (Frame Dump)
 To render and verify the UI headlessly without an X server:
@@ -177,6 +177,13 @@ make dump
 ---
 
 ## Release History
+
+### v1.2.0 (Keypad Expansion, Live Preview & Typography Polish)
+- **Live Expression Preview & Dual Result Display**: Real-time evaluation of ongoing binary operations in the upper history row while typing second operand, with persistence across keystrokes and dual display upon evaluation.
+- **Keypad Expansion & Nested Brackets**: Added 16-level parenthesis evaluation stack (`(`, `)`) in both Basic and Scientific modes; expanded Basic mode to 4x6 grid (24 keys) and Scientific mode to 6x6 grid (36 keys) with power ($x^y$), absolute value (`abs`), factorial (`x!`), $10^x$, $\pi$, $e$, and reciprocal ($1/x$).
+- **Header Bar Redesign**: Enlarged 3-bar hamburger icon, 16x16 circular clock face with hands for history, and crisp bold cross for window close.
+- **Scale 3 Anti-Aliased Typography**: Dynamically rendered large, crisp input numbers up to 14 characters with automatic downscaling for longer inputs.
+- **Subtle Amber Equals Button**: Styled equals button with warm amber (`#ED9A1E`) and crisp white glyph.
 
 ### v1.1.0 (UX & Physical Rounded Corners Release)
 - **Physical Window Rounded Corners**: Corrected X11 wire protocol packet header alignment and `WM_NAME` socket length to properly enable direct X11 Shape Extension clipping (`ShapeBounding` and `ShapeClip`), eliminating sharp 90-degree outer corner triangles.
