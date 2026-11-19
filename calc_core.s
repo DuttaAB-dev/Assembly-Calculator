@@ -12,8 +12,9 @@
 .global append_disp_char, clear_disp, bksp_disp, toggle_sign
 .global exec_basic_key, exec_adv_key, exec_prog_key
 .global eval_expression, update_prog_readouts
-.global parse_double, format_double, parse_int64
-.global op_add, op_sub, op_mul, op_div, op_percent
+.global parse_double, format_double, parse_int64, format_current_base
+.global op_add, op_sub, op_mul, op_div, op_percent, op_pow, op_lparen, op_rparen
+.global build_live_preview, paren_depth, preview_buf
 
 # ------------------------------------------------------------------------------
 # External State Variables & History Callbacks (Defined in calc_ui.s)
@@ -33,6 +34,7 @@
 .extern dirty            # Repaint flag for the UI rendering loop
 .extern commit_history   # Records completed calculation into history journal
 .extern clear_history    # Clears all recorded calculations
+.extern preview_buf, paren_depth, paren_stack_acc, paren_stack_op
 
 # ==============================================================================
 # Read-Only Data Section (Math Constants & Error Strings)
@@ -62,6 +64,9 @@ str_fn_ln:   .asciz "ln("
 str_fn_log:  .asciz "log("
 str_fn_pi:   .asciz "π ="
 str_fn_e:    .asciz "e ="
+str_fn_abs:  .asciz "abs("
+str_fn_10x:  .asciz "10^("
+str_fn_pow:  .asciz " ^ "
 
 # Programmer Mode History Symbols
 str_sym_and: .asciz " & "
@@ -80,8 +85,76 @@ str_sym_shr: .asciz " >> "
 # Appends a single ASCII character (digit, decimal point, etc.) to disp_buf.
 # ------------------------------------------------------------------------------
 append_disp_char:
-    push %rax                   # Preserve input character across clr_next check
+    push %rax
 
+    mov curr_mode(%rip), %edx
+    cmp $2, %edx
+    jne .ap_check_dot
+
+    # Programmer Mode:
+    # Reject decimal point completely
+    cmpb $'.', %al
+    je .ap_drop
+
+    # Base-specific character validation
+    mov curr_base(%rip), %edx
+    cmp $0, %edx
+    je .ap_val_hex
+    cmp $1, %edx
+    je .ap_val_dec
+    cmp $2, %edx
+    je .ap_val_oct
+    cmp $3, %edx
+    je .ap_val_bin
+    jmp .ap_valid
+
+.ap_val_hex:
+    cmpb $'0', %al; jl .ap_drop
+    cmpb $'9', %al; jle .ap_valid
+    cmpb $'A', %al; jl .ap_drop
+    cmpb $'F', %al; jle .ap_valid
+    cmpb $'a', %al; jl .ap_drop
+    cmpb $'f', %al; jg .ap_drop
+    sub $'a' - 'A', %al         # Normalize to uppercase
+    jmp .ap_valid
+
+.ap_val_dec:
+    cmpb $'0', %al; jl .ap_drop
+    cmpb $'9', %al; jg .ap_drop
+    jmp .ap_valid
+
+.ap_val_oct:
+    cmpb $'0', %al; jl .ap_drop
+    cmpb $'7', %al; jg .ap_drop
+    jmp .ap_valid
+
+.ap_val_bin:
+    cmpb $'0', %al; jl .ap_drop
+    cmpb $'1', %al; jg .ap_drop
+    jmp .ap_valid
+
+.ap_check_dot:
+    # Basic / Scientific Mode:
+    # Prevent duplicate decimal points in active number
+    cmpb $'.', %al
+    jne .ap_valid
+
+    lea disp_buf(%rip), %rsi
+    xor %rcx, %rcx
+.ap_dot_scan:
+    movzbq (%rsi, %rcx), %rdx
+    test %dl, %dl
+    jz .ap_valid
+    cmpb $'.', %dl
+    je .ap_drop                 # Duplicate decimal point -> ignore
+    inc %rcx
+    jmp .ap_dot_scan
+
+.ap_drop:
+    pop %rax
+    ret
+
+.ap_valid:
     mov clr_next(%rip), %edx
     test %edx, %edx
     jz .ap_cont
@@ -94,7 +167,7 @@ append_disp_char:
     xor %rcx, %rcx              # %rcx = character length counter
 
 .ap_len:
-    cmpb $0, (%rsi, %rcx)       # Look for null terminator '\0'
+    cmpb $0, (%rsi, %rcx)       # Look for null terminator
     jz .ap_insert
     inc %rcx
     cmp $28, %rcx               # Maximum allowed display length = 28 chars
@@ -109,25 +182,30 @@ append_disp_char:
     cmpb $'.', %al              # If typing '.', keep "0."
     je .do_ap
     movb %al, (%rsi)            # Overwrite '0' with new digit
-    ret
+    jmp .ap_sync_prog
 
 .do_ap:
     movb %al, (%rsi, %rcx)
     movb $0, 1(%rsi, %rcx)
+
+.ap_sync_prog:
+    mov curr_mode(%rip), %eax
+    cmp $2, %eax
+    jne .ap_ret
+    call update_prog_readouts
+
 .ap_ret:
     ret
 
-# ------------------------------------------------------------------------------
-# clear_disp:
-# Clears the active numeric input display (C key).
-# Preserves past history journal entries.
 # ------------------------------------------------------------------------------
 clear_disp:
     lea disp_buf(%rip), %rdi
     movb $'0', (%rdi)           # Display resets to default "0"
     movb $0, 1(%rdi)            # Null terminate
+    movb $0, hist_buf(%rip)     # Reset expression history string
     movl $0, pending_op(%rip)   # Clear pending operator
     movl $0, clr_next(%rip)     # Reset clear-on-next flag
+    movl $0, paren_depth(%rip)  # Reset parentheses stack
     movq $0, acc_val(%rip)      # Reset floating-point accumulator to 0.0
     movq $0, acc_int(%rip)      # Reset integer accumulator to 0
 
@@ -238,30 +316,114 @@ op_percent:
     ret
 
 # ------------------------------------------------------------------------------
-# exec_basic_key:
-# Dispatches keypad click events for Basic Calculator mode.
+
 # ------------------------------------------------------------------------------
+# op_lparen:
+# Pushes current accumulator and pending operator onto paren stack.
+# ------------------------------------------------------------------------------
+op_lparen:
+    mov paren_depth(%rip), %eax
+    cmp $15, %eax
+    jge .lp_ret
+
+    shl $3, %rax                         # depth * 8
+    lea paren_stack_acc(%rip), %rdx
+    movsd acc_val(%rip), %xmm0
+    movsd %xmm0, (%rdx, %rax)
+    shr $1, %rax                         # depth * 4
+    lea paren_stack_op(%rip), %rdx
+    mov pending_op(%rip), %ecx
+    mov %ecx, (%rdx, %rax)
+    incl paren_depth(%rip)
+
+    movq $0, acc_val(%rip)
+    movl $0, pending_op(%rip)
+    movl $1, clr_next(%rip)
+
+    lea hist_buf(%rip), %rdi
+.lp_find:
+    cmpb $0, (%rdi)
+    jz .lp_app
+    inc %rdi
+    jmp .lp_find
+.lp_app:
+    movb $'(', (%rdi)
+    movb $0, 1(%rdi)
+.lp_ret:
+    ret
+
+# ------------------------------------------------------------------------------
+# op_rparen:
+# Evaluates pending inner expression, restores parent accumulator and op.
+# ------------------------------------------------------------------------------
+op_rparen:
+    mov paren_depth(%rip), %eax
+    test %eax, %eax
+    jz .rp_ret
+
+    mov pending_op(%rip), %edx
+    test %edx, %edx
+    jz .rp_no_eval
+    call eval_math_only
+.rp_no_eval:
+    lea hist_buf(%rip), %rdi
+.rp_find:
+    cmpb $0, (%rdi)
+    jz .rp_app_disp
+    inc %rdi
+    jmp .rp_find
+.rp_app_disp:
+    movb $')', (%rdi)
+    movb $0, 1(%rdi)
+
+    decl paren_depth(%rip)
+    mov paren_depth(%rip), %eax
+    shl $3, %rax
+    lea paren_stack_acc(%rip), %rdx
+    movsd (%rdx, %rax), %xmm0
+    movsd %xmm0, acc_val(%rip)
+    shr $1, %rax
+    lea paren_stack_op(%rip), %rdx
+    mov (%rdx, %rax), %ecx
+    mov %ecx, pending_op(%rip)
+    movl $1, clr_next(%rip)
+.rp_ret:
+    ret
+
+# ------------------------------------------------------------------------------
+# op_pow:
+# Power operator (^).
+# ------------------------------------------------------------------------------
+op_pow:
+    mov $5, %edi
+    movb $'^', %sil
+    jmp apply_op
+
 exec_basic_key:
     cmp $0, %eax; je clear_disp
-    cmp $1, %eax; je bksp_disp
-    cmp $2, %eax; je op_percent
-    cmp $3, %eax; je op_div
-    cmp $4, %eax; je .d7
-    cmp $5, %eax; je .d8
-    cmp $6, %eax; je .d9
-    cmp $7, %eax; je op_mul
-    cmp $8, %eax; je .d4
-    cmp $9, %eax; je .d5
-    cmp $10, %eax; je .d6
-    cmp $11, %eax; je op_sub
-    cmp $12, %eax; je .d1
-    cmp $13, %eax; je .d2
-    cmp $14, %eax; je .d3
-    cmp $15, %eax; je op_add
-    cmp $16, %eax; je toggle_sign
-    cmp $17, %eax; je .d0
-    cmp $18, %eax; je .d_dot
-    cmp $19, %eax; je eval_expression
+    cmp $1, %eax; je op_lparen
+    cmp $2, %eax; je op_rparen
+    cmp $3, %eax; je bksp_disp
+    cmp $4, %eax; je op_percent
+    cmp $5, %eax; je .f_sqrt
+    cmp $6, %eax; je .f_sq
+    cmp $7, %eax; je op_div
+    cmp $8, %eax; je .d7
+    cmp $9, %eax; je .d8
+    cmp $10, %eax; je .d9
+    cmp $11, %eax; je op_mul
+    cmp $12, %eax; je .d4
+    cmp $13, %eax; je .d5
+    cmp $14, %eax; je .d6
+    cmp $15, %eax; je op_sub
+    cmp $16, %eax; je .d1
+    cmp $17, %eax; je .d2
+    cmp $18, %eax; je .d3
+    cmp $19, %eax; je op_add
+    cmp $20, %eax; je toggle_sign
+    cmp $21, %eax; je .d0
+    cmp $22, %eax; je .d_dot
+    cmp $23, %eax; je eval_expression
     ret
 
 .d7: movb $'7', %al; jmp append_disp_char
@@ -308,6 +470,10 @@ apply_op:
     push %rdi
     push %rsi
 
+    mov curr_mode(%rip), %eax
+    cmp $2, %eax
+    je .ao_prog
+
     mov pending_op(%rip), %eax
     test %eax, %eax
     jz .ao_fresh
@@ -346,9 +512,50 @@ apply_op:
     movl $1, clr_next(%rip)
     ret
 
-# ------------------------------------------------------------------------------
-# eval_expression:
-# Evaluates expression on '=' and commits completed calculation to history.
+.ao_prog:
+    mov pending_op(%rip), %eax
+    test %eax, %eax
+    jz .ao_prog_fresh
+
+    mov clr_next(%rip), %eax
+    test %eax, %eax
+    jnz .ao_prog_sym
+
+    call eval_prog_math_only
+    mov %rax, acc_int(%rip)
+    mov %rax, %rdi
+    lea disp_buf(%rip), %rsi
+    call format_current_base
+    call update_prog_readouts
+    jmp .ao_prog_sym
+
+.ao_prog_fresh:
+    call parse_int64
+    mov %rax, acc_int(%rip)
+
+.ao_prog_sym:
+    lea hist_buf(%rip), %rdi
+    lea disp_buf(%rip), %rsi
+.ao_prog_cpy:
+    movb (%rsi), %al
+    movb %al, (%rdi)
+    inc %rdi
+    inc %rsi
+    test %al, %al
+    jnz .ao_prog_cpy
+    dec %rdi
+
+    movb $' ', (%rdi)
+    pop %rsi
+    movb %sil, 1(%rdi)
+    movb $' ', 2(%rdi)
+    movb $0, 3(%rdi)
+
+    pop %rdi
+    mov %edi, pending_op(%rip)
+    movl $1, clr_next(%rip)
+    ret
+
 # ------------------------------------------------------------------------------
 eval_expression:
     mov pending_op(%rip), %eax
@@ -382,6 +589,26 @@ eval_expression:
     movb $0, 2(%rdi)
 
     call eval_math_only
+.ee_paren_loop:
+    mov paren_depth(%rip), %eax
+    test %eax, %eax
+    jz .ee_paren_done
+    decl paren_depth(%rip)
+    mov paren_depth(%rip), %eax
+    shl $3, %rax
+    lea paren_stack_acc(%rip), %rdx
+    movsd (%rdx, %rax), %xmm0
+    movsd %xmm0, acc_val(%rip)
+    shr $1, %rax
+    lea paren_stack_op(%rip), %rdx
+    mov (%rdx, %rax), %ecx
+    mov %ecx, pending_op(%rip)
+    test %ecx, %ecx
+    jz .ee_paren_loop
+    call eval_math_only
+    jmp .ee_paren_loop
+.ee_paren_done:
+    call scifn_append_res       # Append result to hist_buf so both show final result
     call commit_history         # Record into history journal!
     movl $0, pending_op(%rip)
     movl $1, clr_next(%rip)
@@ -407,11 +634,26 @@ eval_math_only:
     je .emo_mul
     cmp $4, %eax
     je .emo_div
+    cmp $5, %eax
+    je .emo_pow
 
     fstp %st(0)
     fstp %st(0)
     add $16, %rsp
     ret
+
+.emo_pow:
+    fyl2x
+    fld %st(0)
+    frndint
+    fsubr %st(0), %st(1)
+    fxch %st(1)
+    f2xm1
+    fld1
+    faddp
+    fscale
+    fstp %st(1)
+    jmp .emo_save
 
 .emo_add:
     faddp
@@ -667,8 +909,8 @@ int_to_str:
 
 .its_loop:
     xor %rdx, %rdx
-    mov $10, %rbx
-    div %rbx
+    mov $10, %rcx
+    div %rcx
     add $'0', %dl
     movb %dl, (%rsi)
     dec %rsi
@@ -725,45 +967,166 @@ scifn_prep:
     ret
 
 # ------------------------------------------------------------------------------
-# exec_adv_key:
-# Dispatches keypad click events for Scientific Calculator mode.
+
 # ------------------------------------------------------------------------------
+# scifn_append_res:
+# Appends " " + disp_buf to hist_buf so the completed equation and answer are both visible.
+# ------------------------------------------------------------------------------
+scifn_append_res:
+    lea hist_buf(%rip), %rdi
+.sar_find:
+    cmpb $0, (%rdi)
+    jz .sar_app
+    inc %rdi
+    jmp .sar_find
+.sar_app:
+    cmp %rdi, hist_buf(%rip)
+    je .sar_cpy_start
+    cmpb $' ', -1(%rdi)
+    je .sar_cpy_start
+    movb $' ', (%rdi)
+    inc %rdi
+.sar_cpy_start:
+    lea disp_buf(%rip), %rsi
+.sar_cpy:
+    movb (%rsi), %al
+    movb %al, (%rdi)
+    inc %rsi
+    inc %rdi
+    test %al, %al
+    jnz .sar_cpy
+    ret
+
+.f_abs:
+    lea str_fn_abs(%rip), %rsi
+    call scifn_prep
+    lea disp_buf(%rip), %rsi
+    call parse_double
+    fabs
+    lea disp_buf(%rip), %rdi
+    call format_double
+    call scifn_append_res
+    call commit_history
+    movl $1, clr_next(%rip)
+    ret
+
+.f_10x:
+    lea str_fn_10x(%rip), %rsi
+    call scifn_prep
+    fldl2t
+    lea disp_buf(%rip), %rsi
+    call parse_double
+    fmulp
+    fld %st(0)
+    frndint
+    fsubr %st(0), %st(1)
+    fxch %st(1)
+    f2xm1
+    fld1
+    faddp
+    fscale
+    fstp %st(1)
+    lea disp_buf(%rip), %rdi
+    call format_double
+    call scifn_append_res
+    call commit_history
+    movl $1, clr_next(%rip)
+    ret
+
+.f_fact:
+    lea hist_buf(%rip), %rdi
+    lea disp_buf(%rip), %rsi
+.ff_cp:
+    movb (%rsi), %al
+    movb %al, (%rdi)
+    inc %rsi
+    inc %rdi
+    test %al, %al
+    jnz .ff_cp
+    dec %rdi
+    movb $'!', (%rdi)
+    movb $' ', 1(%rdi)
+    movb $'=', 2(%rdi)
+    movb $0, 3(%rdi)
+
+    call parse_int64
+    cmp $0, %rax
+    jl .ff_err
+    cmp $20, %rax
+    jg .ff_err
+    mov %rax, %rcx
+    mov $1, %rax
+    mov $1, %rsi
+.ff_loop:
+    cmp %rcx, %rsi
+    jg .ff_calc_done
+    imul %rsi, %rax
+    inc %rsi
+    jmp .ff_loop
+.ff_calc_done:
+    lea disp_buf(%rip), %rdi
+    call int_to_str
+    call scifn_append_res
+    call commit_history
+    movl $1, clr_next(%rip)
+    ret
+.ff_err:
+    lea disp_buf(%rip), %rdi
+    lea str_err_nan(%rip), %rsi
+.ff_ecp:
+    movb (%rsi), %al
+    movb %al, (%rdi)
+    inc %rsi
+    inc %rdi
+    test %al, %al
+    jnz .ff_ecp
+    call scifn_append_res
+    call commit_history
+    movl $1, clr_next(%rip)
+    ret
+
 exec_adv_key:
     cmp $0, %eax; je .f_sin
-    cmp $1, %eax; je clear_disp
-    cmp $2, %eax; je bksp_disp
-    cmp $3, %eax; je op_percent
-    cmp $4, %eax; je op_div
+    cmp $1, %eax; je .f_ln
+    cmp $2, %eax; je clear_disp
+    cmp $3, %eax; je op_lparen
+    cmp $4, %eax; je op_rparen
+    cmp $5, %eax; je bksp_disp
 
-    cmp $5, %eax; je .f_cos
-    cmp $6, %eax; je .d7
-    cmp $7, %eax; je .d8
-    cmp $8, %eax; je .d9
-    cmp $9, %eax; je op_mul
+    cmp $6, %eax; je .f_cos
+    cmp $7, %eax; je .f_log
+    cmp $8, %eax; je op_percent
+    cmp $9, %eax; je .f_sqrt
+    cmp $10, %eax; je .f_sq
+    cmp $11, %eax; je op_div
 
-    cmp $10, %eax; je .f_tan
-    cmp $11, %eax; je .d4
-    cmp $12, %eax; je .d5
-    cmp $13, %eax; je .d6
-    cmp $14, %eax; je op_sub
+    cmp $12, %eax; je .f_tan
+    cmp $13, %eax; je op_pow
+    cmp $14, %eax; je .d7
+    cmp $15, %eax; je .d8
+    cmp $16, %eax; je .d9
+    cmp $17, %eax; je op_mul
 
-    cmp $15, %eax; je .f_sqrt
-    cmp $16, %eax; je .d1
-    cmp $17, %eax; je .d2
-    cmp $18, %eax; je .d3
-    cmp $19, %eax; je op_add
+    cmp $18, %eax; je .f_pi
+    cmp $19, %eax; je .f_e
+    cmp $20, %eax; je .d4
+    cmp $21, %eax; je .d5
+    cmp $22, %eax; je .d6
+    cmp $23, %eax; je op_sub
 
-    cmp $20, %eax; je .f_pi
-    cmp $21, %eax; je toggle_sign
-    cmp $22, %eax; je .d0
-    cmp $23, %eax; je .d_dot
-    cmp $24, %eax; je eval_expression
+    cmp $24, %eax; je .f_inv
+    cmp $25, %eax; je .f_abs
+    cmp $26, %eax; je .d1
+    cmp $27, %eax; je .d2
+    cmp $28, %eax; je .d3
+    cmp $29, %eax; je op_add
 
-    cmp $25, %eax; je .f_e
-    cmp $26, %eax; je .f_ln
-    cmp $27, %eax; je .f_log
-    cmp $28, %eax; je .f_sq
-    cmp $29, %eax; je .f_inv
+    cmp $30, %eax; je .f_fact
+    cmp $31, %eax; je .f_10x
+    cmp $32, %eax; je toggle_sign
+    cmp $33, %eax; je .d0
+    cmp $34, %eax; je .d_dot
+    cmp $35, %eax; je eval_expression
     ret
 
 # --- Scientific Functions with Functional History & Auto-Commit ---
@@ -776,6 +1139,7 @@ exec_adv_key:
     fsin
     lea disp_buf(%rip), %rdi
     call format_double
+    call scifn_append_res
     call commit_history
     movl $1, clr_next(%rip)
     ret
@@ -789,6 +1153,7 @@ exec_adv_key:
     fcos
     lea disp_buf(%rip), %rdi
     call format_double
+    call scifn_append_res
     call commit_history
     movl $1, clr_next(%rip)
     ret
@@ -803,6 +1168,7 @@ exec_adv_key:
     fstp %st(0)
     lea disp_buf(%rip), %rdi
     call format_double
+    call scifn_append_res
     call commit_history
     movl $1, clr_next(%rip)
     ret
@@ -821,6 +1187,7 @@ exec_adv_key:
     fldpi
     lea disp_buf(%rip), %rdi
     call format_double
+    call scifn_append_res
     call commit_history
     movl $1, clr_next(%rip)
     ret
@@ -839,6 +1206,7 @@ exec_adv_key:
     fldl fp_e(%rip)
     lea disp_buf(%rip), %rdi
     call format_double
+    call scifn_append_res
     call commit_history
     movl $1, clr_next(%rip)
     ret
@@ -851,6 +1219,7 @@ exec_adv_key:
     fsqrt
     lea disp_buf(%rip), %rdi
     call format_double
+    call scifn_append_res
     call commit_history
     movl $1, clr_next(%rip)
     ret
@@ -879,6 +1248,7 @@ exec_adv_key:
     fmulp
     lea disp_buf(%rip), %rdi
     call format_double
+    call scifn_append_res
     call commit_history
     movl $1, clr_next(%rip)
     ret
@@ -892,6 +1262,7 @@ exec_adv_key:
     fdivp
     lea disp_buf(%rip), %rdi
     call format_double
+    call scifn_append_res
     call commit_history
     movl $1, clr_next(%rip)
     ret
@@ -905,6 +1276,7 @@ exec_adv_key:
     fyl2x
     lea disp_buf(%rip), %rdi
     call format_double
+    call scifn_append_res
     call commit_history
     movl $1, clr_next(%rip)
     ret
@@ -918,6 +1290,7 @@ exec_adv_key:
     fyl2x
     lea disp_buf(%rip), %rdi
     call format_double
+    call scifn_append_res
     call commit_history
     movl $1, clr_next(%rip)
     ret
@@ -998,32 +1371,52 @@ exec_prog_key:
 .hex_E: movb $'E', %al; call append_disp_char; call update_prog_readouts; ret
 .hex_F: movb $'F', %al; call append_disp_char; call update_prog_readouts; ret
 
-.p_and:
-    call parse_int64
+apply_prog_bitwise:
+    push %rdi
+    push %rsi
+
+    mov pending_op(%rip), %eax
+    test %eax, %eax
+    jz .apb_fresh
+
+    mov clr_next(%rip), %eax
+    test %eax, %eax
+    jnz .apb_sym
+
+    call eval_prog_math_only
     mov %rax, acc_int(%rip)
-    lea str_sym_and(%rip), %rsi
+    mov %rax, %rdi
+    lea disp_buf(%rip), %rsi
+    call format_current_base
+    call update_prog_readouts
+
+.apb_sym:
+    pop %rsi
     call prog_op_prep
-    movl $7, pending_op(%rip)
+    pop %rdi
+    mov %edi, pending_op(%rip)
     movl $1, clr_next(%rip)
     ret
+
+.apb_fresh:
+    call parse_int64
+    mov %rax, acc_int(%rip)
+    jmp .apb_sym
+
+.p_and:
+    mov $7, %edi
+    lea str_sym_and(%rip), %rsi
+    jmp apply_prog_bitwise
 
 .p_or:
-    call parse_int64
-    mov %rax, acc_int(%rip)
+    mov $8, %edi
     lea str_sym_or(%rip), %rsi
-    call prog_op_prep
-    movl $8, pending_op(%rip)
-    movl $1, clr_next(%rip)
-    ret
+    jmp apply_prog_bitwise
 
 .p_xor:
-    call parse_int64
-    mov %rax, acc_int(%rip)
+    mov $9, %edi
     lea str_sym_xor(%rip), %rsi
-    call prog_op_prep
-    movl $9, pending_op(%rip)
-    movl $1, clr_next(%rip)
-    ret
+    jmp apply_prog_bitwise
 
 .p_not:
     # Build hist_buf: "~" + disp_buf + " ="
@@ -1054,21 +1447,60 @@ exec_prog_key:
     ret
 
 .p_shl:
-    call parse_int64
-    mov %rax, acc_int(%rip)
+    mov $10, %edi
     lea str_sym_shl(%rip), %rsi
-    call prog_op_prep
-    movl $10, pending_op(%rip)
-    movl $1, clr_next(%rip)
-    ret
+    jmp apply_prog_bitwise
 
 .p_shr:
-    call parse_int64
-    mov %rax, acc_int(%rip)
+    mov $11, %edi
     lea str_sym_shr(%rip), %rsi
-    call prog_op_prep
-    movl $11, pending_op(%rip)
-    movl $1, clr_next(%rip)
+    jmp apply_prog_bitwise
+
+# ------------------------------------------------------------------------------
+# eval_prog_math_only:
+# Executes pending 64-bit integer arithmetic/bitwise operation on acc_int and disp_buf.
+# Returns computed 64-bit integer in %rax.
+# ------------------------------------------------------------------------------
+eval_prog_math_only:
+    call parse_int64
+    mov %rax, %r8               # Second operand in %r8
+    mov acc_int(%rip), %rax     # First operand
+
+    mov pending_op(%rip), %ecx
+    cmp $1, %ecx; je .po_add
+    cmp $2, %ecx; je .po_sub
+    cmp $3, %ecx; je .po_mul
+    cmp $4, %ecx; je .po_div
+    cmp $7, %ecx; je .po_and
+    cmp $8, %ecx; je .po_or
+    cmp $9, %ecx; je .po_xor
+    cmp $10, %ecx; je .po_shl
+    cmp $11, %ecx; je .po_shr
+    ret
+
+.po_add: add %r8, %rax; ret
+.po_sub: sub %r8, %rax; ret
+.po_mul: imul %r8, %rax; ret
+.po_div:
+    test %r8, %r8
+    jz .po_div_zero
+    cqo
+    idiv %r8
+    ret
+.po_div_zero:
+    xor %rax, %rax
+    ret
+
+.po_and: and %r8, %rax; ret
+.po_or:  or %r8, %rax;  ret
+.po_xor: xor %r8, %rax; ret
+.po_shl:
+    mov %r8b, %cl
+    shl %cl, %rax
+    ret
+.po_shr:
+    mov %r8b, %cl
+    shr %cl, %rax
     ret
 
 # ------------------------------------------------------------------------------
@@ -1097,60 +1529,19 @@ eval_prog_op:
     movb $'=', 1(%rdi)
     movb $0, 2(%rdi)
 
-    call parse_int64
-    mov %rax, %rbx              # Second operand
-    mov acc_int(%rip), %rax     # First operand
+    call eval_prog_math_only
 
-    mov pending_op(%rip), %ecx
-    cmp $1, %ecx; je .po_add
-    cmp $2, %ecx; je .po_sub
-    cmp $3, %ecx; je .po_mul
-    cmp $4, %ecx; je .po_div
-    cmp $7, %ecx; je .po_and
-    cmp $8, %ecx; je .po_or
-    cmp $9, %ecx; je .po_xor
-    cmp $10, %ecx; je .po_shl
-    cmp $11, %ecx; je .po_shr
-    jmp .po_done
-
-.po_add: add %rbx, %rax; jmp .po_done
-.po_sub: sub %rbx, %rax; jmp .po_done
-.po_mul: imul %rbx, %rax; jmp .po_done
-.po_div:
-    test %rbx, %rbx
-    jz .po_div_zero
-    xor %rdx, %rdx
-    idiv %rbx
-    jmp .po_done
-.po_div_zero:
-    xor %rax, %rax
-    jmp .po_done
-
-.po_and: and %rbx, %rax; jmp .po_done
-.po_or:  or %rbx, %rax;  jmp .po_done
-.po_xor: xor %rbx, %rax; jmp .po_done
-.po_shl:
-    mov %bl, %cl
-    shl %cl, %rax
-    jmp .po_done
-.po_shr:
-    mov %bl, %cl
-    shr %cl, %rax
-    jmp .po_done
-
-.po_done:
     mov %rax, acc_int(%rip)
     mov %rax, %rdi
     lea disp_buf(%rip), %rsi
     call format_current_base
     call update_prog_readouts
+    call scifn_append_res
     call commit_history         # Record into history journal!
     movl $0, pending_op(%rip)
     movl $1, clr_next(%rip)
     ret
 
-# ------------------------------------------------------------------------------
-# format_current_base:
 # ------------------------------------------------------------------------------
 format_current_base:
     mov curr_base(%rip), %eax
@@ -1268,6 +1659,12 @@ parse_int64:
     lea disp_buf(%rip), %rsi
     xor %rax, %rax
     mov curr_base(%rip), %r8d
+    xor %r9d, %r9d                      # is_negative = 0
+
+    cmpb $'-', (%rsi)
+    jne .pi_loop
+    inc %rsi
+    mov $1, %r9d                        # is_negative = 1
 
 .pi_loop:
     movzbq (%rsi), %rdx
@@ -1330,6 +1727,10 @@ parse_int64:
     jmp .pi_loop
 
 .pi_done:
+    test %r9d, %r9d
+    jz .pi_ret
+    neg %rax
+.pi_ret:
     ret
 
 update_prog_readouts:
@@ -1389,6 +1790,11 @@ format_hex:
 format_dec:
     mov %rdi, %rax
     mov %rsi, %rdi
+    test %rax, %rax
+    jns int_to_str
+    movb $'-', (%rdi)
+    inc %rdi
+    neg %rax
     jmp int_to_str
 
 format_oct:
@@ -1453,4 +1859,131 @@ format_bin:
 
 .fb_d:
     movb $0, (%rsi)
+    ret
+
+# ------------------------------------------------------------------------------
+# build_live_preview:
+# Generates non-destructive preview of pending calculation into preview_buf.
+# preview_buf = hist_buf + disp_buf + " = " + preview_answer
+# ------------------------------------------------------------------------------
+.global build_live_preview
+build_live_preview:
+    push %rbp
+    mov %rsp, %rbp
+    sub $128, %rsp
+
+    # 1. Copy hist_buf into preview_buf
+    lea preview_buf(%rip), %rdi
+    lea hist_buf(%rip), %rsi
+.blp_cp1:
+    movb (%rsi), %al
+    movb %al, (%rdi)
+    inc %rsi
+    inc %rdi
+    test %al, %al
+    jnz .blp_cp1
+    dec %rdi
+
+    # 2. Append disp_buf
+    lea disp_buf(%rip), %rsi
+.blp_cp2:
+    movb (%rsi), %al
+    movb %al, (%rdi)
+    inc %rsi
+    inc %rdi
+    test %al, %al
+    jnz .blp_cp2
+    dec %rdi
+
+    # 3. Append " = "
+    movb $' ', (%rdi)
+    movb $'=', 1(%rdi)
+    movb $' ', 2(%rdi)
+    add $3, %rdi
+    mov %rdi, -8(%rbp)                   # save pointer for result string
+
+    # 4. Compute preview value
+    mov curr_mode(%rip), %eax
+    cmp $2, %eax
+    je .blp_prog
+
+    # Basic / Scientific floating point preview
+    fldl acc_val(%rip)
+    lea disp_buf(%rip), %rsi
+    call parse_double
+
+    mov pending_op(%rip), %eax
+    cmp $1, %eax; je .blp_add
+    cmp $2, %eax; je .blp_sub
+    cmp $3, %eax; je .blp_mul
+    cmp $4, %eax; je .blp_div
+    cmp $5, %eax; je .blp_pow
+    fstp %st(0)
+    fstp %st(0)
+    jmp .blp_done
+
+.blp_add: faddp; jmp .blp_fmt
+.blp_sub: fsubrp; jmp .blp_fmt
+.blp_mul: fmulp; jmp .blp_fmt
+.blp_div:
+    fldz
+    fcomip %st(1), %st(0)
+    jne .blp_do_div
+    fstp %st(0)
+    fstp %st(0)
+    jmp .blp_done
+.blp_do_div:
+    fdivrp
+    jmp .blp_fmt
+.blp_pow:
+    fyl2x
+    fld %st(0)
+    frndint
+    fsubr %st(0), %st(1)
+    fxch %st(1)
+    f2xm1
+    fld1
+    faddp
+    fscale
+    fstp %st(1)
+.blp_fmt:
+    mov -8(%rbp), %rdi
+    call format_double
+    jmp .blp_done
+
+.blp_prog:
+    # Programmer Mode 64-bit integer preview
+    call parse_int64
+    mov %rax, %rsi                       # %rsi = current operand
+    mov acc_int(%rip), %rax              # %rax = acc_int
+    mov pending_op(%rip), %ecx
+    cmp $1, %ecx; je .blp_p_add
+    cmp $2, %ecx; je .blp_p_sub
+    cmp $3, %ecx; je .blp_p_mul
+    cmp $4, %ecx; je .blp_p_div
+    cmp $7, %ecx; je .blp_p_and
+    cmp $8, %ecx; je .blp_p_or
+    cmp $9, %ecx; je .blp_p_xor
+    cmp $10, %ecx; je .blp_p_shl
+    cmp $11, %ecx; je .blp_p_shr
+    jmp .blp_p_fmt
+.blp_p_add: add %rsi, %rax; jmp .blp_p_fmt
+.blp_p_sub: sub %rsi, %rax; jmp .blp_p_fmt
+.blp_p_mul: imul %rsi, %rax; jmp .blp_p_fmt
+.blp_p_div:
+    test %rsi, %rsi; jz .blp_done
+    cqo
+    idiv %rsi
+    jmp .blp_p_fmt
+.blp_p_and: and %rsi, %rax; jmp .blp_p_fmt
+.blp_p_or:  or %rsi, %rax;  jmp .blp_p_fmt
+.blp_p_xor: xor %rsi, %rax; jmp .blp_p_fmt
+.blp_p_shl: mov %sil, %cl; shl %cl, %rax; jmp .blp_p_fmt
+.blp_p_shr: mov %sil, %cl; shr %cl, %rax; jmp .blp_p_fmt
+.blp_p_fmt:
+    mov %rax, %rdi
+    mov -8(%rbp), %rsi
+    call format_current_base
+.blp_done:
+    leave
     ret

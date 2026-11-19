@@ -49,10 +49,11 @@
 # Exported Global Symbols
 # ------------------------------------------------------------------------------
 .global _start
-.global WIN_W, WIN_H, fb_ptr, disp_buf, hist_buf, hex_buf, dec_buf, oct_buf, bin_buf
+.global WIN_W, WIN_H, fb_ptr, disp_buf, hist_buf, hex_buf, dec_buf, oct_buf, bin_buf, preview_buf, paren_depth, paren_stack_acc, paren_stack_op
 .global curr_mode, curr_base, menu_open, hover_btn, active_btn, hover_menu, dirty
 .global pending_op, clr_next, acc_val, acc_int, exit_clean, exit_fail
-.global history_count, history_open, history_hover, history_entries, commit_history, clear_history
+.extern build_live_preview, preview_buf, paren_depth
+.global history_count, history_open, history_hover, history_entries, commit_history, clear_history, render_ui
 
 # ==============================================================================
 # Window & Framebuffer Geometry Constants
@@ -88,14 +89,14 @@
 .equ COL_BTN_HOVER,   0x3D3D3D           # Keypad button hover surface (#3D3D3D)
 .equ COL_BTN_ACTIVE,  0x282828           # Keypad button pressed surface (#282828)
 .equ COL_BTN_BORDER,  0x3E3E3E           # Keypad button border (#3E3E3E)
-.equ COL_ACCENT,      0x3584E4           # Libadwaita accent blue
-.equ COL_EQUALS,      0xED9A1E           # Warm amber equals button
-.equ COL_EQUALS_TEXT, 0xFFFFFF           # Crisp white text on amber (#3584E4)
+.equ COL_ACCENT,      0x3584E4           # Libadwaita accent blue (#3584E4)
 .equ COL_ACC_HOV,     0x4790E8           # Accent button hover state (#4790E8)
 .equ COL_ACC_ACT,     0x1C71D8           # Accent button active state (#1C71D8)
 .equ COL_DEST,        0xE01B24           # Destructive action red (Clear) (#E01B24)
 .equ COL_DEST_HOV,    0xE63840           # Destructive hover state (#E63840)
 .equ COL_DEST_ACT,    0xC01C28           # Destructive active state (#C01C28)
+.equ COL_EQUALS,      0xED9A1E           # Equals action warm amber / golden orange (#ED9A1E)
+.equ COL_EQUALS_TEXT, 0xFFFFFF           # Crisp white text on warm amber button
 .equ COL_POPOVER_BG,  0x2A2A2A           # Popover menu card background (#2A2A2A)
 .equ COL_POPOVER_BRD, 0x444444           # Popover menu card border (#444444)
 .equ COL_POPOVER_HOV, 0x383838           # Popover item hover background (#383838)
@@ -142,13 +143,13 @@ str_app_title:    .asciz "Calculator"                   # Application name
 # 3. UI HeaderBar Mode Titles
 str_basic_title:  .asciz "Basic Calculator"
 str_adv_title:    .asciz "Scientific Calculator"
-str_prog_title:   .asciz "Programming Calculator"
+str_prog_title:   .asciz "Programmer Calculator"
 
 # 4. Popover Menu Item Labels
-str_menu_basic:   .asciz "  Basic Mode"
-str_menu_adv:     .asciz "  Scientific Mode"
-str_menu_prog:    .asciz "  Programming Mode"
-str_menu_clear:   .asciz "  Clear History"
+str_menu_basic:   .asciz "Basic Mode"
+str_menu_adv:     .asciz "Scientific Mode"
+str_menu_prog:    .asciz "Programmer Mode"
+str_menu_clear:   .asciz "Clear History"
 
 # 5. Programmer Mode Base Inspector Labels
 str_hex_lbl:      .asciz "HEX:"
@@ -161,22 +162,38 @@ str_hist_title:  .asciz "Calculation History"
 str_hist_empty:  .asciz "No History Yet"
 str_hist_clear:  .asciz "Clear All History"
 
+# Multi-character button labels
+str_lbl_sin:  .asciz "sin"
+str_lbl_cos:  .asciz "cos"
+str_lbl_tan:  .asciz "tan"
+str_lbl_ln:   .asciz "ln"
+str_lbl_log:  .asciz "log"
+str_lbl_sqr:  .asciz "x^2"
+str_lbl_inv:  .asciz "1/x"
+str_lbl_shl:  .asciz "<<"
+str_lbl_shr:  .asciz ">>"
+str_lbl_fact: .asciz "x!"
+str_lbl_abs:  .asciz "abs"
+str_lbl_10x:  .asciz "10^x"
+str_lbl_pow:  .asciz "^"
+
 # 6. Keypad Grid Layout Tables (ASCII or custom glyph bytes)
 # Glyph IDs: 127 = ≡, 128 = π, 129 = √, 130 = ⌫, 131 = ÷, 132 = ×, 133 = ±
 basic_key_labels:
-    .byte 'C', 130, '%', 131
+    .byte 'C', '(', ')', 130
+    .byte '%', 129, 'q', 131
     .byte '7', '8', '9', 132
     .byte '4', '5', '6', '-'
     .byte '1', '2', '3', '+'
     .byte 133, '0', '.', '='
 
 adv_key_types:
-    .byte 's', 'C', 130, '%', 131
-    .byte 'c', '7', '8', '9', 132
-    .byte 't', '4', '5', '6', '-'
-    .byte 129, '1', '2', '3', '+'
-    .byte 128, 133, '0', '.', '='
-    .byte 'e', 'l', 'g', '^', 'r'
+    .byte 's', 'l', 'C', '(', ')', 130
+    .byte 'c', 'g', '%', 129, 'q', 131
+    .byte 't', '^', '7', '8', '9', 132
+    .byte 128, 'e', '4', '5', '6', '-'
+    .byte 'i', 'a', '1', '2', '3', '+'
+    .byte '!', 'T', 133, '0', '.', '='
 
 # 7. Physical Window Rounded Corners Clipping Rectangles Table (33 entries)
 # Passed to X11 Shape Extension (ShapeRectangles) to clip window to 16px radius.
@@ -279,6 +296,10 @@ hex_buf:        .skip 32                 # Programmer Mode: Hex readout buffer
 dec_buf:        .skip 32                 # Programmer Mode: Dec readout buffer
 oct_buf:        .skip 32                 # Programmer Mode: Oct readout buffer
 bin_buf:        .skip 64                 # Programmer Mode: Bin readout buffer
+preview_buf:    .skip 256                # Live expression calculation preview buffer
+paren_depth:    .long 0                  # Current parenthesis nesting level
+paren_stack_acc:.skip 16 * 8             # Saved accumulator stack
+paren_stack_op: .skip 16 * 4             # Saved pending operator stack
 
 # Multiplexed Event Polling Structure (struct pollfd for sys_poll)
 poll_pfd:
@@ -519,7 +540,7 @@ _start:
     cmp $2, %eax
     je .mock_prog
 
-    # Basic mode mock: "1420", history "710 + 710"
+    # Basic mode mock: "1420", history "710 + 710 = 1420"
     movb $'1', (%rdi)
     movb $'4', 1(%rdi)
     movb $'2', 2(%rdi)
@@ -535,11 +556,18 @@ _start:
     movb $'7', 6(%rsi)
     movb $'1', 7(%rsi)
     movb $'0', 8(%rsi)
-    movb $0, 9(%rsi)
+    movb $' ', 9(%rsi)
+    movb $'=', 10(%rsi)
+    movb $' ', 11(%rsi)
+    movb $'1', 12(%rsi)
+    movb $'4', 13(%rsi)
+    movb $'2', 14(%rsi)
+    movb $'0', 15(%rsi)
+    movb $0, 16(%rsi)
     jmp .start_dump_render
 
 .mock_adv:
-    # Scientific mode mock: "0.7071", history "sin(45)"
+    # Scientific mode mock: "0.7071", history "sin(45) = 0.7071"
     movb $'0', (%rdi)
     movb $'.', 1(%rdi)
     movb $'7', 2(%rdi)
@@ -555,7 +583,16 @@ _start:
     movb $'4', 4(%rsi)
     movb $'5', 5(%rsi)
     movb $(')'), 6(%rsi)
-    movb $0, 7(%rsi)
+    movb $' ', 7(%rsi)
+    movb $'=', 8(%rsi)
+    movb $' ', 9(%rsi)
+    movb $'0', 10(%rsi)
+    movb $'.', 11(%rsi)
+    movb $'7', 12(%rsi)
+    movb $'0', 13(%rsi)
+    movb $'7', 14(%rsi)
+    movb $'1', 15(%rsi)
+    movb $0, 16(%rsi)
     jmp .start_dump_render
 
 .mock_prog:
@@ -1862,8 +1899,10 @@ draw_glyph:
     lea font_data(%rip), %r14
     add %rdx, %r14                       # %r14 = pointer to 512-byte glyph bitmap
 
-    cmpq $2, -56(%rbp)
+    cmpl $2, -56(%rbp)
     je .dg_scale2
+    cmpl $3, -56(%rbp)
+    je .dg_scale3
 
     # Scale 1: 8 columns x 16 rows with 2x2 box subsampling
     movl $0, -80(%rbp)                   # gy = 0
@@ -2016,6 +2055,90 @@ draw_glyph:
     incl -80(%rbp)
     jmp .dg_s2_row_loop
 
+
+    # Scale 3: 24 columns x 48 rows enlarged anti-aliased glyph
+.dg_scale3:
+    movl $0, -80(%rbp)                   # gy = 0
+.dg_s3_row_loop:
+    mov -80(%rbp), %eax
+    cmp $48, %eax
+    jge .dg_ret
+
+    mov %r13d, %edx
+    add %eax, %edx                       # py = y + gy
+    cmp $WIN_H, %edx
+    jge .dg_s3_row_next
+    test %edx, %edx
+    jl .dg_s3_row_next
+
+    imul $WIN_W, %edx
+    add %r12d, %edx
+    shl $2, %rdx
+    add fb_ptr(%rip), %rdx
+    mov %rdx, -72(%rbp)                  # pixel_ptr
+
+    movl $0, -64(%rbp)                   # gx = 0
+.dg_s3_col_loop:
+    mov -64(%rbp), %eax
+    cmp $24, %eax
+    jge .dg_s3_row_next
+
+    mov %r12d, %edx
+    add %eax, %edx                       # px = x + gx
+    cmp $WIN_W, %edx
+    jge .dg_s3_col_next
+    test %edx, %edx
+    jl .dg_s3_col_next
+
+    # sy = (gy * 2) / 3
+    mov -80(%rbp), %eax
+    shl $1, %eax
+    xor %edx, %edx
+    mov $3, %ecx
+    div %ecx
+    shl $4, %eax                         # sy * 16
+
+    # sx = (gx * 2) / 3
+    mov -64(%rbp), %ecx
+    shl $1, %ecx
+    mov %eax, -44(%rbp)                  # save sy*16
+    mov %ecx, %eax
+    xor %edx, %edx
+    mov $3, %ecx
+    div %ecx
+    add -44(%rbp), %eax                  # offset = sy*16 + sx
+
+    movzbq (%r14, %rax), %rax
+
+    test %eax, %eax
+    jz .dg_s3_col_next
+
+    cmp $255, %eax
+    je .dg_s3_solid
+
+    mov -72(%rbp), %rdx
+    mov (%rdx), %edi                     # bg
+    mov -48(%rbp), %esi                  # fg = color
+    mov %eax, %edx                       # alpha
+    call blend_pixel
+    mov -72(%rbp), %rdx
+    mov %eax, (%rdx)
+    jmp .dg_s3_col_next
+
+.dg_s3_solid:
+    mov -48(%rbp), %eax
+    mov -72(%rbp), %rdx
+    mov %eax, (%rdx)
+
+.dg_s3_col_next:
+    addq $4, -72(%rbp)
+    incl -64(%rbp)
+    jmp .dg_s3_col_loop
+
+.dg_s3_row_next:
+    incl -80(%rbp)
+    jmp .dg_s3_row_loop
+
 .dg_ret:
     mov -8(%rbp), %r12
     mov -16(%rbp), %r13
@@ -2079,6 +2202,107 @@ draw_string:
 # ==============================================================================
 
 # ------------------------------------------------------------------------------
+
+# ------------------------------------------------------------------------------
+# draw_clock_icon:
+# Draws a clean 16x16 clock icon inside History button (center 346, 25).
+# ------------------------------------------------------------------------------
+draw_clock_icon:
+    push %rbp
+    mov %rsp, %rbp
+    sub $32, %rsp
+    movl $16, -4(%rbp)                   # cy = 16..34
+.dci_y_loop:
+    cmpl $35, -4(%rbp)
+    jge .dci_hands
+    movl $337, -8(%rbp)                  # cx = 337..355
+.dci_x_loop:
+    cmpl $356, -8(%rbp)
+    jge .dci_y_next
+
+    mov -8(%rbp), %eax
+    sub $346, %eax
+    imul %eax, %eax
+    mov -4(%rbp), %edx
+    sub $25, %edx
+    imul %edx, %edx
+    add %edx, %eax
+    cmp $42, %eax
+    jl .dci_x_next
+    cmp $72, %eax
+    jg .dci_x_next
+
+    mov -4(%rbp), %eax
+    imul $WIN_W, %eax
+    add -8(%rbp), %eax
+    shl $2, %rax
+    add fb_ptr(%rip), %rax
+    movl $COL_TEXT_PRI, (%rax)
+
+.dci_x_next:
+    incl -8(%rbp)
+    jmp .dci_x_loop
+
+.dci_y_next:
+    incl -4(%rbp)
+    jmp .dci_y_loop
+
+.dci_hands:
+    mov $345, %edi
+    mov $19, %esi
+    mov $2, %edx
+    mov $7, %ecx
+    mov $COL_TEXT_PRI, %r8d
+    call draw_rect
+    mov $346, %edi
+    mov $24, %esi
+    mov $6, %edx
+    mov $2, %ecx
+    mov $COL_TEXT_PRI, %r8d
+    call draw_rect
+    leave
+    ret
+
+# ------------------------------------------------------------------------------
+# draw_close_icon:
+# Draws a bold 12x12 diagonal cross inside Close button (center 390, 25).
+# ------------------------------------------------------------------------------
+draw_close_icon:
+    push %rbp
+    mov %rsp, %rbp
+    sub $16, %rsp
+    movl $-5, -4(%rbp)
+.dcr_loop:
+    cmpl $6, -4(%rbp)
+    jge .dcr_done
+    mov -4(%rbp), %edx
+
+    mov $25, %eax
+    add %edx, %eax
+    imul $WIN_W, %eax
+    add $390, %eax
+    add %edx, %eax
+    shl $2, %rax
+    add fb_ptr(%rip), %rax
+    movl $COL_TEXT_PRI, (%rax)
+    movl $COL_TEXT_PRI, 4(%rax)
+
+    mov $25, %eax
+    sub %edx, %eax
+    imul $WIN_W, %eax
+    add $390, %eax
+    add %edx, %eax
+    shl $2, %rax
+    add fb_ptr(%rip), %rax
+    movl $COL_TEXT_PRI, (%rax)
+    movl $COL_TEXT_PRI, 4(%rax)
+
+    incl -4(%rbp)
+    jmp .dcr_loop
+.dcr_done:
+    leave
+    ret
+
 # render_ui:
 # Master compositor for all UI elements:
 #   1. Clears outer canvas to 0 (corners transparent).
@@ -2130,29 +2354,45 @@ render_ui:
     call draw_squircle
     add $8, %rsp
 
-    # Draw '≡' icon (Glyph 127) inside hamburger button
-    mov $22, %edi
-    mov $17, %esi
-    mov $127, %edx
+    # Draw 3 crisp horizontal bars inside hamburger button
+    mov $20, %edi
+    mov $18, %esi
+    mov $20, %edx
+    mov $2, %ecx
     mov $COL_TEXT_PRI, %r8d
-    mov $1, %r9d
-    call draw_glyph
+    call draw_rect
 
-    # 5. HeaderBar Mode Title
-    lea str_basic_title(%rip), %rdx
+    mov $20, %edi
+    mov $24, %esi
+    mov $20, %edx
+    mov $2, %ecx
+    mov $COL_TEXT_PRI, %r8d
+    call draw_rect
+
+    mov $20, %edi
+    mov $30, %esi
+    mov $20, %edx
+    mov $2, %ecx
+    mov $COL_TEXT_PRI, %r8d
+    call draw_rect
+
+    # 5. HeaderBar Mode Title (exact pixel centering for 420px window)
     mov curr_mode(%rip), %eax
     cmp $1, %eax
     je .t_adv
     cmp $2, %eax
     je .t_prog
+    lea str_basic_title(%rip), %rdx
+    mov $146, %edi                       # (420 - 128) / 2 = 146
     jmp .t_draw
 .t_adv:
     lea str_adv_title(%rip), %rdx
+    mov $126, %edi                       # (420 - 168) / 2 = 126
     jmp .t_draw
 .t_prog:
     lea str_prog_title(%rip), %rdx
+    mov $126, %edi                       # (420 - 168) / 2 = 126
 .t_draw:
-    mov $130, %edi
     mov $17, %esi
     mov $COL_TEXT_PRI, %r8d
     mov $1, %r9d
@@ -2174,13 +2414,8 @@ render_ui:
     call draw_squircle
     add $8, %rsp
 
-    # Clock icon (Glyph 136) at x=342, y=17
-    mov $342, %edi
-    mov $17, %esi
-    mov $136, %edx
-    mov $COL_TEXT_PRI, %r8d
-    mov $1, %r9d
-    call draw_glyph
+    # Clock icon inside history button
+    call draw_clock_icon
 
     # 6. Window Close Button (x=372, y=8, w=36, h=34, r=17 circle)
     mov $372, %edi
@@ -2194,13 +2429,8 @@ render_ui:
     call draw_squircle
     add $8, %rsp
 
-    # Draw 'x' icon inside close button
-    mov $386, %edi
-    mov $17, %esi
-    mov $'x', %edx
-    mov $COL_TEXT_PRI, %r8d
-    mov $1, %r9d
-    call draw_glyph
+    # Draw bold diagonal cross inside close button
+    call draw_close_icon
 
     # 7. Inset Display Card (x=16, y=62, w=388, h=140, r=14)
     mov $16, %edi
@@ -2220,15 +2450,24 @@ render_ui:
     je .render_disp_prog
 
     # --- Basic / Scientific Mode Display ---
-    # History expression at y=78 (1x scale, secondary color)
+    # History expression / live preview at y=76 (1x scale, secondary color)
     mov $32, %edi
-    mov $78, %esi
+    mov $76, %esi
     lea hist_buf(%rip), %rdx
+    cmpl $0, pending_op(%rip)
+    jz .draw_hist_static
+    cmpb $0, disp_buf(%rip)
+    jz .draw_hist_static
+    cmpl $0, clr_next(%rip)
+    jnz .draw_hist_static
+    call build_live_preview
+    lea preview_buf(%rip), %rdx
+.draw_hist_static:
     mov $COL_TEXT_SEC, %r8d
     mov $1, %r9d
     call draw_string
 
-    # Main active input string at y=136 (2x scale, right-aligned)
+    # Main active input string with scale 3 font (right-aligned)
     lea disp_buf(%rip), %rdx
     xor %rcx, %rcx
 .len_loop:
@@ -2237,17 +2476,34 @@ render_ui:
     inc %rcx
     jmp .len_loop
 .len_done:
-    shl $4, %rcx                         # Width = len * (8 * scale 2) = len * 16
-    mov $384, %edi                       # Right boundary anchor
-    sub %ecx, %edi
+    cmp $14, %rcx
+    jg .scale2_disp
+    imul $24, %ecx, %eax                 # Width = len * 24 (scale 3)
+    mov $384, %edi
+    sub %eax, %edi
     cmp $32, %edi
-    jge .x_ok
-    mov $32, %edi                        # Left clamp
-.x_ok:
-    mov $136, %esi
+    jge .x3_ok
+    mov $32, %edi
+.x3_ok:
+    mov $132, %esi
     lea disp_buf(%rip), %rdx
     mov $COL_TEXT_PRI, %r8d
-    mov $2, %r9d                         # 2x enlarged scale
+    mov $3, %r9d                         # Scale 3!
+    call draw_string
+    jmp .render_keypad
+
+.scale2_disp:
+    imul $16, %ecx, %eax                 # Width = len * 16 (scale 2 fallback)
+    mov $384, %edi
+    sub %eax, %edi
+    cmp $32, %edi
+    jge .x2_ok
+    mov $32, %edi
+.x2_ok:
+    mov $140, %esi
+    lea disp_buf(%rip), %rdx
+    mov $COL_TEXT_PRI, %r8d
+    mov $2, %r9d                         # Scale 2
     call draw_string
     jmp .render_keypad
 
@@ -2277,6 +2533,13 @@ render_ui:
     mov $74, %edi
     mov $114, %esi
     lea hex_buf(%rip), %rdx
+    mov $COL_TEXT_SEC, %r8d
+    mov curr_base(%rip), %eax
+    cmp $0, %eax
+    jne .h1_val
+    mov $COL_TEXT_PRI, %r8d
+.h1_val:
+    mov $1, %r9d
     call draw_string
 
     # DEC readout row at y=134
@@ -2295,6 +2558,13 @@ render_ui:
     mov $74, %edi
     mov $134, %esi
     lea dec_buf(%rip), %rdx
+    mov $COL_TEXT_SEC, %r8d
+    mov curr_base(%rip), %eax
+    cmp $1, %eax
+    jne .h2_val
+    mov $COL_TEXT_PRI, %r8d
+.h2_val:
+    mov $1, %r9d
     call draw_string
 
     # OCT readout row at y=154
@@ -2313,6 +2583,13 @@ render_ui:
     mov $74, %edi
     mov $154, %esi
     lea oct_buf(%rip), %rdx
+    mov $COL_TEXT_SEC, %r8d
+    mov curr_base(%rip), %eax
+    cmp $2, %eax
+    jne .h3_val
+    mov $COL_TEXT_PRI, %r8d
+.h3_val:
+    mov $1, %r9d
     call draw_string
 
     # BIN readout row at y=174
@@ -2331,6 +2608,13 @@ render_ui:
     mov $74, %edi
     mov $174, %esi
     lea bin_buf(%rip), %rdx
+    mov $COL_TEXT_SEC, %r8d
+    mov curr_base(%rip), %eax
+    cmp $3, %eax
+    jne .h4_val
+    mov $COL_TEXT_PRI, %r8d
+.h4_val:
+    mov $1, %r9d
     call draw_string
 
 .render_keypad:
@@ -2369,22 +2653,17 @@ render_ui:
     ret
 
 # ------------------------------------------------------------------------------
-# render_basic_keys:
-# Renders 4 columns x 5 rows keypad buttons for Basic Mode.
-# Button geometry: width = 89px, height = 80px, radius = 14px.
-# Centers 2x enlarged bold glyphs inside each button.
-# ------------------------------------------------------------------------------
 render_basic_keys:
     push %rbp
     mov %rsp, %rbp
     sub $32, %rsp
 
-    xor %r12d, %r12d                     # %r12d = key index (0..19)
+    xor %r12d, %r12d                     # %r12d = key index (0..23)
 .bk_loop:
-    cmp $20, %r12d
+    cmp $24, %r12d
     jge .bk_done
 
-    # Calculate row and column: row = index / 4, col = index % 4
+    # row = index / 4, col = index % 4
     mov %r12d, %eax
     xor %edx, %edx
     mov $4, %ecx
@@ -2392,32 +2671,34 @@ render_basic_keys:
     mov %eax, %r13d                      # %r13d = row
     mov %edx, %r14d                      # %r14d = col
 
-    # Button coordinates: x = 16 + col * 99, y = 216 + row * 90
+    # Coordinates: x = 17 + col * 99, y = 218 + row * 74
     imul $99, %r14d, %edi
-    add $16, %edi
-    imul $90, %r13d, %esi
-    add $216, %esi
+    add $17, %edi
+    imul $74, %r13d, %esi
+    add $218, %esi
     mov $89, %edx                        # Button width = 89
-    mov $80, %ecx                        # Button height = 80
+    mov $66, %ecx                        # Button height = 66
 
-    # Color selection: Clear is Red (COL_DEST), Operators are Accent Blue, rest Idle
     mov $COL_BTN_IDLE, %r8d
     mov $COL_BTN_BORDER, %r9d
     cmp $0, %r12d
     jne .b_not_c
-    mov $COL_DEST, %r8d                  # 'C' button is destructive red
+    mov $COL_DEST, %r8d                  # 'C' button (index 0) is destructive red
     jmp .b_color_ok
 .b_not_c:
-    cmp $19, %r12d                       # '=' button
+    cmp $23, %r12d                       # '=' button (index 23)
+    je .b_is_eq
+    cmp $7, %r12d                        # '÷' button (index 7)
     je .b_is_acc
-    cmp $3, %r12d                        # '÷' button
+    cmp $11, %r12d                       # '×' button (index 11)
     je .b_is_acc
-    cmp $7, %r12d                        # '×' button
+    cmp $15, %r12d                       # '-' button (index 15)
     je .b_is_acc
-    cmp $11, %r12d                       # '-' button
+    cmp $19, %r12d                       # '+' button (index 19)
     je .b_is_acc
-    cmp $15, %r12d                       # '+' button
-    je .b_is_acc
+    jmp .b_color_ok
+.b_is_eq:
+    mov $COL_EQUALS, %r8d                # Equals is warm amber
     jmp .b_color_ok
 .b_is_acc:
     mov $COL_ACCENT, %r8d                # Operators are accent blue
@@ -2425,21 +2706,38 @@ render_basic_keys:
     push %rdi
     push %rsi
     sub $8, %rsp
-    movq $14, (%rsp)                     # Button corner radius = 14px
+    movq $12, (%rsp)                     # Button corner radius = 12px
     call draw_squircle
     add $8, %rsp
     pop %rsi
     pop %rdi
 
-    # Render centered glyph at 2x scale (+36, +24)
+    cmp $6, %r12d
+    je .bk_lbl_sqr
+
+    # Render centered glyph at 2x scale (+36, +17)
     lea basic_key_labels(%rip), %rax
     movzbq (%rax, %r12), %rdx
     lea 36(%rdi), %edi
-    lea 28(%rsi), %esi
+    lea 17(%rsi), %esi
     mov $COL_TEXT_PRI, %r8d
-    mov $2, %r9d                         # 2x enlarged scale
+    cmp $23, %r12d
+    jne .bk_draw_g
+    mov $COL_EQUALS_TEXT, %r8d
+.bk_draw_g:
+    mov $2, %r9d
     call draw_glyph
+    jmp .bk_next
 
+.bk_lbl_sqr:
+    lea 32(%rdi), %edi
+    lea 25(%rsi), %esi
+    lea str_lbl_sqr(%rip), %rdx
+    mov $COL_TEXT_PRI, %r8d
+    mov $1, %r9d
+    call draw_string
+
+.bk_next:
     inc %r12d
     jmp .bk_loop
 
@@ -2448,53 +2746,53 @@ render_basic_keys:
     ret
 
 # ------------------------------------------------------------------------------
-# render_adv_keys:
-# Renders 5 columns x 6 rows keypad buttons for Scientific Mode.
-# Button geometry: width = 71px, height = 66px, radius = 12px.
-# ------------------------------------------------------------------------------
 render_adv_keys:
     push %rbp
     mov %rsp, %rbp
+    sub $32, %rsp
 
-    xor %r12d, %r12d                     # %r12d = key index (0..29)
+    xor %r12d, %r12d                     # %r12d = key index (0..35)
 .ak_loop:
-    cmp $30, %r12d
+    cmp $36, %r12d
     jge .ak_done
 
-    # row = index / 5, col = index % 5
+    # row = index / 6, col = index % 6
     mov %r12d, %eax
     xor %edx, %edx
-    mov $5, %ecx
+    mov $6, %ecx
     div %ecx
     mov %eax, %r13d                      # %r13d = row
     mov %edx, %r14d                      # %r14d = col
 
-    # Coordinates: x = 16 + col * 79, y = 216 + row * 74
-    imul $79, %r14d, %edi
-    add $16, %edi
+    # Coordinates: x = 11 + col * 68, y = 218 + row * 74
+    imul $68, %r14d, %edi
+    add $11, %edi
     imul $74, %r13d, %esi
-    add $216, %esi
-    mov $71, %edx                        # Button width = 71
+    add $218, %esi
+    mov $58, %edx                        # Button width = 58
     mov $66, %ecx                        # Button height = 66
 
     mov $COL_BTN_IDLE, %r8d
     mov $COL_BTN_BORDER, %r9d
 
-    cmp $1, %r12d                        # 'C' button
+    cmp $2, %r12d                        # 'C' button (index 2)
     jne .ak_not_c
     mov $COL_DEST, %r8d
     jmp .ak_col_ok
 .ak_not_c:
-    cmp $4, %r12d                        # '÷'
+    cmp $35, %r12d                       # '=' button (index 35)
+    je .ak_is_eq
+    cmp $11, %r12d                       # '÷' (index 11)
     je .ak_is_acc
-    cmp $9, %r12d                        # '×'
+    cmp $17, %r12d                       # '×' (index 17)
     je .ak_is_acc
-    cmp $14, %r12d                       # '-'
+    cmp $23, %r12d                       # '-' (index 23)
     je .ak_is_acc
-    cmp $19, %r12d                       # '+'
+    cmp $29, %r12d                       # '+' (index 29)
     je .ak_is_acc
-    cmp $24, %r12d                       # '='
-    je .ak_is_acc
+    jmp .ak_col_ok
+.ak_is_eq:
+    mov $COL_EQUALS, %r8d                # Equals is warm amber
     jmp .ak_col_ok
 .ak_is_acc:
     mov $COL_ACCENT, %r8d
@@ -2508,17 +2806,85 @@ render_adv_keys:
     pop %rsi
     pop %rdi
 
-    # Render centered glyph at 2x scale (+27, +17)
+    # Check multi-character scientific labels
+    cmp $0, %r12d; je .ak_lbl_sin
+    cmp $1, %r12d; je .ak_lbl_ln
+    cmp $6, %r12d; je .ak_lbl_cos
+    cmp $7, %r12d; je .ak_lbl_log
+    cmp $10, %r12d; je .ak_lbl_sqr
+    cmp $12, %r12d; je .ak_lbl_tan
+    cmp $24, %r12d; je .ak_lbl_inv
+    cmp $25, %r12d; je .ak_lbl_abs
+    cmp $30, %r12d; je .ak_lbl_fact
+    cmp $31, %r12d; je .ak_lbl_10x
+
+    # Single-character glyph at 2x scale (+21, +17)
     lea adv_key_types(%rip), %rax
     movzbq (%rax, %r12), %rbx
-
-    lea 27(%rdi), %edi
-    lea 21(%rsi), %esi
+    lea 21(%rdi), %edi
+    lea 17(%rsi), %esi
     mov %ebx, %edx
     mov $COL_TEXT_PRI, %r8d
+    cmp $35, %r12d
+    jne .ak_draw_g
+    mov $COL_EQUALS_TEXT, %r8d
+.ak_draw_g:
     mov $2, %r9d
     call draw_glyph
+    jmp .ak_next
 
+.ak_lbl_sin:
+    lea str_lbl_sin(%rip), %rdx
+    jmp .ak_draw_3
+.ak_lbl_cos:
+    lea str_lbl_cos(%rip), %rdx
+    jmp .ak_draw_3
+.ak_lbl_tan:
+    lea str_lbl_tan(%rip), %rdx
+    jmp .ak_draw_3
+.ak_lbl_log:
+    lea str_lbl_log(%rip), %rdx
+    jmp .ak_draw_3
+.ak_lbl_sqr:
+    lea str_lbl_sqr(%rip), %rdx
+    jmp .ak_draw_3
+.ak_lbl_inv:
+    lea str_lbl_inv(%rip), %rdx
+    jmp .ak_draw_3
+.ak_lbl_abs:
+    lea str_lbl_abs(%rip), %rdx
+    jmp .ak_draw_3
+
+.ak_draw_3:
+    lea 17(%rdi), %edi                   # 3 chars at scale 1: (58 - 24)/2 = 17
+    lea 25(%rsi), %esi                   # (66 - 16)/2 = 25
+    mov $COL_TEXT_PRI, %r8d
+    mov $1, %r9d
+    call draw_string
+    jmp .ak_next
+
+.ak_lbl_ln:
+    lea str_lbl_ln(%rip), %rdx
+    jmp .ak_draw_2
+.ak_lbl_fact:
+    lea str_lbl_fact(%rip), %rdx
+.ak_draw_2:
+    lea 21(%rdi), %edi                   # 2 chars at scale 1: (58 - 16)/2 = 21
+    lea 25(%rsi), %esi
+    mov $COL_TEXT_PRI, %r8d
+    mov $1, %r9d
+    call draw_string
+    jmp .ak_next
+
+.ak_lbl_10x:
+    lea str_lbl_10x(%rip), %rdx
+    lea 13(%rdi), %edi                   # 4 chars at scale 1: (58 - 32)/2 = 13
+    lea 25(%rsi), %esi
+    mov $COL_TEXT_PRI, %r8d
+    mov $1, %r9d
+    call draw_string
+
+.ak_next:
     inc %r12d
     jmp .ak_loop
 
@@ -2562,16 +2928,19 @@ render_prog_keys:
     mov $COL_DEST, %r8d
     jmp .pk_col_ok
 .pk_not_c:
+    cmp $27, %r12d                       # '=' button
+    je .pk_is_eq
     cmp $14, %r12d                       # '÷'
     je .pk_is_acc
     cmp $19, %r12d                       # '×'
     je .pk_is_acc
     cmp $24, %r12d                       # '-'
     je .pk_is_acc
-    cmp $27, %r12d                       # '='
-    je .pk_is_acc
     cmp $29, %r12d                       # '+'
     je .pk_is_acc
+    jmp .pk_col_ok
+.pk_is_eq:
+    mov $COL_EQUALS, %r8d                # Equals is subtle orange
     jmp .pk_col_ok
 .pk_is_acc:
     mov $COL_ACCENT, %r8d
@@ -2585,21 +2954,40 @@ render_prog_keys:
     pop %rsi
     pop %rdi
 
-    # Render centered glyph at 2x scale (+27, +17)
+    # Multi-character labels for programmer shift buttons at 2x scale
+    cmp $5, %r12d
+    je .pk_lbl_shl
+    cmp $6, %r12d
+    je .pk_lbl_shr
+
+    # Single-character glyph at 2x scale (+27, +17)
     lea prog_key_types(%rip), %rax
     movzbq (%rax, %r12), %rbx
-
     lea 27(%rdi), %edi
-    lea 21(%rsi), %esi
+    lea 17(%rsi), %esi
     mov %ebx, %edx
     mov $COL_TEXT_PRI, %r8d
     cmp $27, %r12d
     jne .pk_draw_g
-    mov $COL_EQUALS_TEXT, %r8d
+    mov $COL_EQUALS_TEXT, %r8d           # Crisp white text on warm amber button
 .pk_draw_g:
     mov $2, %r9d
     call draw_glyph
+    jmp .pk_next
 
+.pk_lbl_shl:
+    lea str_lbl_shl(%rip), %rdx
+    jmp .pk_draw_2
+.pk_lbl_shr:
+    lea str_lbl_shr(%rip), %rdx
+.pk_draw_2:
+    lea 19(%rdi), %edi                   # 2 chars at scale 2: (71 - 32)/2 = 19
+    lea 17(%rsi), %esi
+    mov $COL_TEXT_PRI, %r8d
+    mov $2, %r9d
+    call draw_string
+
+.pk_next:
     inc %r12d
     jmp .pk_loop
 
@@ -2662,7 +3050,7 @@ render_popover:
     mov $1, %r9d
     call draw_glyph
 
-    mov $40, %edi
+    mov $44, %edi
     mov $66, %esi
     lea str_menu_basic(%rip), %rdx
     mov $COL_TEXT_PRI, %r8d
@@ -2696,7 +3084,7 @@ render_popover:
     mov $1, %r9d
     call draw_glyph
 
-    mov $40, %edi
+    mov $44, %edi
     mov $104, %esi
     lea str_menu_adv(%rip), %rdx
     mov $COL_TEXT_PRI, %r8d
@@ -2730,7 +3118,7 @@ render_popover:
     mov $1, %r9d
     call draw_glyph
 
-    mov $40, %edi
+    mov $44, %edi
     mov $142, %esi
     lea str_menu_prog(%rip), %rdx
     mov $COL_TEXT_PRI, %r8d
@@ -2760,7 +3148,7 @@ render_popover:
     add $8, %rsp
 .m3_nh:
 
-    mov $40, %edi
+    mov $44, %edi
     mov $188, %esi
     lea str_menu_clear(%rip), %rdx
     mov $COL_DEST, %r8d                 # Red text for destructive action
@@ -3328,8 +3716,14 @@ handle_x11_event:
     jle .sb_ok
     mov $3, %eax
 .sb_ok:
-    mov %eax, curr_base(%rip)            # Switch active programmer radix
-    call update_prog_readouts
+    push %rax
+    call parse_int64                     # %rax = current value parsed with old base
+    pop %rcx
+    mov %ecx, curr_base(%rip)            # Switch active programmer radix
+    mov %rax, %rdi
+    lea disp_buf(%rip), %rsi
+    call format_current_base             # Reformat disp_buf into newly selected base
+    call update_prog_readouts            # Refresh all 4 base readouts
     movl $1, dirty(%rip)
     jmp .h_done
 
@@ -3344,9 +3738,9 @@ handle_x11_event:
     je .click_prog
 
     # --- Basic Keypad Click Hit-Testing ---
-    # col = (x - 16) / 99 (valid cols: 0..3)
+    # col = (x - 17) / 99 (valid cols: 0..3)
     mov %ecx, %eax
-    sub $16, %eax
+    sub $17, %eax
     js .h_done
     xor %edx, %edx
     mov $99, %esi
@@ -3355,40 +3749,9 @@ handle_x11_event:
     jge .h_done
     mov %eax, %r14d
 
-    # row = (y - 216) / 90 (valid rows: 0..4)
+    # row = (y - 218) / 74 (valid rows: 0..5)
     movswl ev_packet+26(%rip), %eax
-    sub $216, %eax
-    js .h_done
-    xor %edx, %edx
-    mov $90, %esi
-    div %esi
-    cmp $5, %eax
-    jge .h_done
-    mov %eax, %r13d
-
-    # key_index = row * 4 + col
-    imul $4, %r13d, %eax
-    add %r14d, %eax
-    call exec_basic_key
-    movl $1, dirty(%rip)
-    jmp .h_done
-
-.click_adv:
-    # --- Scientific Keypad Click Hit-Testing ---
-    # col = (x - 16) / 79 (valid cols: 0..4)
-    mov %ecx, %eax
-    sub $16, %eax
-    js .h_done
-    xor %edx, %edx
-    mov $79, %esi
-    div %esi
-    cmp $5, %eax
-    jge .h_done
-    mov %eax, %r14d
-
-    # row = (y - 216) / 74 (valid rows: 0..5)
-    movswl ev_packet+26(%rip), %eax
-    sub $216, %eax
+    sub $218, %eax
     js .h_done
     xor %edx, %edx
     mov $74, %esi
@@ -3397,8 +3760,39 @@ handle_x11_event:
     jge .h_done
     mov %eax, %r13d
 
-    # key_index = row * 5 + col
-    imul $5, %r13d, %eax
+    # key_index = row * 4 + col (0..23)
+    imul $4, %r13d, %eax
+    add %r14d, %eax
+    call exec_basic_key
+    movl $1, dirty(%rip)
+    jmp .h_done
+
+.click_adv:
+    # --- Scientific Keypad Click Hit-Testing ---
+    # col = (x - 11) / 68 (valid cols: 0..5)
+    mov %ecx, %eax
+    sub $11, %eax
+    js .h_done
+    xor %edx, %edx
+    mov $68, %esi
+    div %esi
+    cmp $6, %eax
+    jge .h_done
+    mov %eax, %r14d
+
+    # row = (y - 218) / 74 (valid rows: 0..5)
+    movswl ev_packet+26(%rip), %eax
+    sub $218, %eax
+    js .h_done
+    xor %edx, %edx
+    mov $74, %esi
+    div %esi
+    cmp $6, %eax
+    jge .h_done
+    mov %eax, %r13d
+
+    # key_index = row * 6 + col (0..35)
+    imul $6, %r13d, %eax
     add %r14d, %eax
     call exec_adv_key
     movl $1, dirty(%rip)
@@ -3445,8 +3839,24 @@ handle_x11_event:
     movzbq ev_packet+1(%rip), %rax
     cmp $9, %rax                         # Escape (key 9) -> Clear
     je .k_clear
-    cmp $54, %rax                        # 'c' key -> Clear
-    je .k_clear
+    cmp $54, %rax                        # 'c' key -> Clear (or 'C' in Hex)
+    je .k_c_key
+
+    # Hexadecimal keys A-F in Programmer Mode (HEX base)
+    mov curr_mode(%rip), %edx
+    cmp $2, %edx
+    jne .k_not_hex
+    mov curr_base(%rip), %edx
+    cmp $0, %edx
+    jne .k_not_hex
+
+    cmp $38, %rax; je .k_hex_a
+    cmp $56, %rax; je .k_hex_b
+    cmp $40, %rax; je .k_hex_d
+    cmp $26, %rax; je .k_hex_e
+    cmp $41, %rax; je .k_hex_f
+
+.k_not_hex:
     cmp $36, %rax                        # Return / Enter -> Evaluate
     je .k_eval
     cmp $104, %rax                       # Numpad Enter -> Evaluate
@@ -3490,7 +3900,40 @@ handle_x11_event:
     je .k_mul
     cmp $21, %rax                        # Keycode 21 = '='
     je .k_eval
+    cmp $91, %rax                        # Numpad '.'
+    je .k_dot
+    cmp $90, %rax                        # Numpad '0'
+    je .k_kp0
+    cmp $87, %rax                        # Numpad '1'
+    je .k_kp1
+    cmp $88, %rax                        # Numpad '2'
+    je .k_kp2
+    cmp $89, %rax                        # Numpad '3'
+    je .k_kp3
+    cmp $83, %rax                        # Numpad '4'
+    je .k_kp4
+    cmp $84, %rax                        # Numpad '5'
+    je .k_kp5
+    cmp $85, %rax                        # Numpad '6'
+    je .k_kp6
+    cmp $79, %rax                        # Numpad '7'
+    je .k_kp7
+    cmp $80, %rax                        # Numpad '8'
+    je .k_kp8
+    cmp $81, %rax                        # Numpad '9'
+    je .k_kp9
     jmp .h_done
+
+.k_kp0: movb $'0', %al; call append_disp_char; movl $1, dirty(%rip); jmp .h_done
+.k_kp1: movb $'1', %al; call append_disp_char; movl $1, dirty(%rip); jmp .h_done
+.k_kp2: movb $'2', %al; call append_disp_char; movl $1, dirty(%rip); jmp .h_done
+.k_kp3: movb $'3', %al; call append_disp_char; movl $1, dirty(%rip); jmp .h_done
+.k_kp4: movb $'4', %al; call append_disp_char; movl $1, dirty(%rip); jmp .h_done
+.k_kp5: movb $'5', %al; call append_disp_char; movl $1, dirty(%rip); jmp .h_done
+.k_kp6: movb $'6', %al; call append_disp_char; movl $1, dirty(%rip); jmp .h_done
+.k_kp7: movb $'7', %al; call append_disp_char; movl $1, dirty(%rip); jmp .h_done
+.k_kp8: movb $'8', %al; call append_disp_char; movl $1, dirty(%rip); jmp .h_done
+.k_kp9: movb $'9', %al; call append_disp_char; movl $1, dirty(%rip); jmp .h_done
 
 .k_dot:
     movb $'.', %al
@@ -3513,6 +3956,24 @@ handle_x11_event:
     call op_div
     movl $1, dirty(%rip)
     jmp .h_done
+.k_c_key:
+    mov curr_mode(%rip), %edx
+    cmp $2, %edx
+    jne .k_clear
+    mov curr_base(%rip), %edx
+    cmp $0, %edx
+    jne .k_clear
+    movb $'C', %al
+    call append_disp_char
+    movl $1, dirty(%rip)
+    jmp .h_done
+
+.k_hex_a: movb $'A', %al; call append_disp_char; movl $1, dirty(%rip); jmp .h_done
+.k_hex_b: movb $'B', %al; call append_disp_char; movl $1, dirty(%rip); jmp .h_done
+.k_hex_d: movb $'D', %al; call append_disp_char; movl $1, dirty(%rip); jmp .h_done
+.k_hex_e: movb $'E', %al; call append_disp_char; movl $1, dirty(%rip); jmp .h_done
+.k_hex_f: movb $'F', %al; call append_disp_char; movl $1, dirty(%rip); jmp .h_done
+
 .k_clear:
     call clear_disp
     movl $1, dirty(%rip)
