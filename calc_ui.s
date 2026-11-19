@@ -88,7 +88,9 @@
 .equ COL_BTN_HOVER,   0x3D3D3D           # Keypad button hover surface (#3D3D3D)
 .equ COL_BTN_ACTIVE,  0x282828           # Keypad button pressed surface (#282828)
 .equ COL_BTN_BORDER,  0x3E3E3E           # Keypad button border (#3E3E3E)
-.equ COL_ACCENT,      0x3584E4           # Libadwaita accent blue (#3584E4)
+.equ COL_ACCENT,      0x3584E4           # Libadwaita accent blue
+.equ COL_EQUALS,      0xED9A1E           # Warm amber equals button
+.equ COL_EQUALS_TEXT, 0xFFFFFF           # Crisp white text on amber (#3584E4)
 .equ COL_ACC_HOV,     0x4790E8           # Accent button hover state (#4790E8)
 .equ COL_ACC_ACT,     0x1C71D8           # Accent button active state (#1C71D8)
 .equ COL_DEST,        0xE01B24           # Destructive action red (Clear) (#E01B24)
@@ -2591,6 +2593,10 @@ render_prog_keys:
     lea 21(%rsi), %esi
     mov %ebx, %edx
     mov $COL_TEXT_PRI, %r8d
+    cmp $27, %r12d
+    jne .pk_draw_g
+    mov $COL_EQUALS_TEXT, %r8d
+.pk_draw_g:
     mov $2, %r9d
     call draw_glyph
 
