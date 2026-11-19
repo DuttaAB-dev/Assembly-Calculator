@@ -2451,8 +2451,6 @@ render_ui:
 
     # --- Basic / Scientific Mode Display ---
     # History expression / live preview at y=76 (1x scale, secondary color)
-    mov $32, %edi
-    mov $76, %esi
     lea hist_buf(%rip), %rdx
     cmpl $0, pending_op(%rip)
     jz .draw_hist_static
@@ -2463,6 +2461,8 @@ render_ui:
     call build_live_preview
     lea preview_buf(%rip), %rdx
 .draw_hist_static:
+    mov $32, %edi
+    mov $76, %esi
     mov $COL_TEXT_SEC, %r8d
     mov $1, %r9d
     call draw_string
