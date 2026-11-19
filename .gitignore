@@ -8,3 +8,7 @@ preview_*.ppm
 
 # Internal environment skills directory
 skills/
+
+# Release distribution bundle
+dist/
+preview_*.png
